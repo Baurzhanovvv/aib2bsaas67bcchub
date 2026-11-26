@@ -283,3 +283,24 @@ def test_multiline_marker_in_short_tail_is_quoted() -> None:
 def test_blank_line_separates_sentences() -> None:
     texts = ["Срок хранения 5 лет.\n\nДоступ должен быть удобным."]
     assert by_rule(run(texts), "RULE-VAGUE")
+
+
+def test_impact_per_rule() -> None:
+    from reqcheck.models import Impact
+
+    assert (
+        by_rule(run(["GET /a/update — изменить запись."]), "RULE-HTTP-SAFE-METHOD")[0].impact
+        is Impact.HIGH
+    )
+    assert (
+        by_rule(run(['Ответ 200: {"status": "ERROR"}']), "RULE-HTTP-ERROR-200")[0].impact
+        is Impact.HIGH
+    )
+    assert by_rule(run(["Срок: TBD, уточняется."]), "RULE-TBD")[0].impact is Impact.MEDIUM
+    refs = run(["FR-1. Базовое.", "FR-2. Как FR-7."], source_ids=["FR-1", "FR-2"])
+    assert by_rule(refs, "RULE-UNDEFINED-REF")[0].impact is Impact.MEDIUM
+    assert (
+        by_rule(run(["Отклик должен приходить быстро."]), "RULE-VAGUE")[0].impact is Impact.MEDIUM
+    )
+    low = by_rule(run(["Форматы: PDF, DOCX и др."]), "RULE-VAGUE")
+    assert low[0].impact is Impact.LOW

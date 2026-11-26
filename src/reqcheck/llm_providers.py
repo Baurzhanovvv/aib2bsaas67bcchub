@@ -13,7 +13,7 @@ from typing import Any, Protocol
 from reqcheck.errors import ModelError
 
 TEMPERATURE = 0.1
-REQUEST_TIMEOUT_S = 120.0
+REQUEST_TIMEOUT_S = 60.0
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 _MAX_ERROR_CHARS = 1500
 
@@ -29,11 +29,20 @@ class ProviderReply:
 class ProviderError(Exception):
     """Сбой транспорта. reason — безопасный текст для пользователя (без ключей)."""
 
-    def __init__(self, reason: str, *, retryable: bool, retry_after: float | None = None) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        retryable: bool,
+        retry_after: float | None = None,
+        exhausted: bool = False,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.retryable = retryable
         self.retry_after = retry_after
+        self.exhausted = exhausted
+        """Дневная квота модели исчерпана: в этом прогоне её больше не пробуем."""
 
 
 class Provider(Protocol):
@@ -48,7 +57,9 @@ def _redact(text: str, secret: str) -> str:
     return cleaned[:_MAX_ERROR_CHARS]
 
 
-def _classify_status(code: int, message: str, retry_after: float | None) -> ProviderError:
+def _classify_status(
+    code: int, message: str, retry_after: float | None, *, daily: bool = False
+) -> ProviderError:
     if code in (401, 403) or (code == 400 and "api key" in message.lower()):
         return ProviderError("ключ API неверен или не имеет доступа", retryable=False)
     if code == 429:
@@ -56,6 +67,7 @@ def _classify_status(code: int, message: str, retry_after: float | None) -> Prov
             "исчерпана квота или превышен лимит запросов (429)",
             retryable=True,
             retry_after=retry_after,
+            exhausted=daily,
         )
     if code == 408 or code >= 500:
         return ProviderError(
@@ -107,7 +119,7 @@ class GeminiProvider:
             system_instruction=system,
             temperature=TEMPERATURE,
             response_mime_type="application/json",
-            response_json_schema=schema,
+            response_json_schema=simplify_schema(schema),
             http_options=_gemini_http_options(),
         )
         try:
@@ -119,6 +131,7 @@ class GeminiProvider:
                 int(exc.code or 0),
                 _redact(str(exc.message or ""), self._key),
                 _gemini_retry_after(exc),
+                daily=_is_daily_quota(exc),
             ) from None
         except Exception:  # noqa: BLE001 — сеть, таймаут, SSL — детали SDK могут содержать URL с ключом
             raise ProviderError("нет связи с сервисом модели (сеть)", retryable=True) from None
@@ -131,6 +144,43 @@ class GeminiProvider:
             if usage
             else 0,
         )
+
+
+def _is_daily_quota(exc: Any) -> bool:
+    """429 из-за суточной квоты модели (идентификатор квоты содержит PerDay)."""
+    if int(exc.code or 0) != 429:
+        return False
+    text = f"{exc.message} {exc.details}".lower()
+    return "perday" in text or "per day" in text or "daily" in text
+
+
+_DROPPED_SCHEMA_KEYS = {"title", "default", "$defs", "examples"}
+
+
+def simplify_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Схема pydantic → совместимая со всеми моделями: без $ref/$defs, title и default."""
+    defs = schema.get("$defs", {})
+
+    def walk(node: Any, depth: int = 0) -> Any:
+        if isinstance(node, list):
+            return [walk(item, depth) for item in node]
+        if not isinstance(node, dict):
+            return node
+        if "$ref" in node and depth < 20:
+            target = defs.get(str(node["$ref"]).rsplit("/", 1)[-1], {})
+            return walk({**target, **{k: v for k, v in node.items() if k != "$ref"}}, depth + 1)
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key in _DROPPED_SCHEMA_KEYS:
+                continue
+            if key == "properties" and isinstance(value, dict):  # имена полей не фильтруем
+                out[key] = {name: walk(sub, depth) for name, sub in value.items()}
+            else:
+                out[key] = walk(value, depth)
+        return out
+
+    result = walk(schema)
+    return result if isinstance(result, dict) else schema
 
 
 def _gemini_retry_after(exc: Any) -> float | None:

@@ -10,6 +10,7 @@ from reqcheck.models import (
     FindingSource,
     Fragment,
     FragmentKind,
+    Impact,
     Location,
     RawFinding,
     Requirement,
@@ -57,12 +58,14 @@ def raw(
     source: FindingSource = FindingSource.MODEL,
     suggestion: str | None = None,
     explanation: str = "Пояснение.",
+    impact: Impact = Impact.MEDIUM,
 ) -> RawFinding:
     return RawFinding(
         defect_type=defect,
         requirement_ids=ids,
         quotes=quotes,
         explanation=explanation,
+        impact=impact,
         suggestion=suggestion,
         scope=scope,
         source=source,
@@ -140,6 +143,7 @@ def test_contradiction_is_blocker_with_both_quotes() -> None:
         ids=("R-001", "R-002"),
         defect=DefectType.CONTRADICTION,
         scope=Scope.REQUIREMENT_SET,
+        impact=Impact.HIGH,
     )
     f = run([finding]).findings[0]
     assert f.severity is Severity.BLOCKER
@@ -166,31 +170,26 @@ def test_taxonomy_covers_every_defect_type() -> None:
     assert all(m.standard_ref for m in taxonomy.TAXONOMY.values())
 
 
-@pytest.mark.parametrize(
-    ("defect", "severity"),
-    [
-        (DefectType.CONTRADICTION, Severity.BLOCKER),
-        (DefectType.MISSING_REQUIREMENT, Severity.CRITICAL),
-        (DefectType.INTERFACE_MISUSE, Severity.CRITICAL),
-        (DefectType.UNVERIFIABLE, Severity.CRITICAL),
-        (DefectType.INCOMPLETE, Severity.MAJOR),
-        (DefectType.AMBIGUOUS, Severity.MAJOR),
-        (DefectType.UNDEFINED_REFERENCE, Severity.MAJOR),
-        (DefectType.INCONSISTENT_TERMS, Severity.MAJOR),
-        (DefectType.INFEASIBLE, Severity.MAJOR),
-        (DefectType.NOT_SINGULAR, Severity.MINOR),
-        (DefectType.DESIGN_CONSTRAINT, Severity.MINOR),
-        (DefectType.DUPLICATE, Severity.MINOR),
-        (DefectType.UNTRACEABLE, Severity.MINOR),
-    ],
-)
-def test_severity_from_taxonomy(defect: DefectType, severity: Severity) -> None:
-    assert taxonomy.TAXONOMY[defect].severity is severity
+@pytest.mark.parametrize("defect", list(DefectType))
+def test_severity_table_complete_and_monotonic(defect: DefectType) -> None:
+    ranks = [taxonomy.SEVERITY_ORDER.index(taxonomy.severity_for(defect, i)) for i in Impact]
+    assert ranks == sorted(ranks)
+
+
+def test_same_type_different_impact_different_severity() -> None:
+    sev = {i: taxonomy.severity_for(DefectType.CONTRADICTION, i) for i in Impact}
+    assert sev == {
+        Impact.HIGH: Severity.BLOCKER,
+        Impact.MEDIUM: Severity.CRITICAL,
+        Impact.LOW: Severity.MAJOR,
+    }
+    quote = ("Курьер обязан подтверждать",)
+    got = [run([raw(quote, ids=("R-002",), impact=i)]).findings[0].severity for i in Impact]
+    assert got == [Severity.MAJOR, Severity.MAJOR, Severity.MINOR]
 
 
 def test_markup_applied() -> None:
     f = run([raw(("Курьер обязан подтверждать",), ids=("R-002",))]).findings[0]
-    assert f.severity is Severity.MAJOR
     assert f.standard_ref.startswith("ISO/IEC/IEEE 29148:2018, 5.2.5")
 
 
@@ -246,7 +245,7 @@ def test_ids_and_order_deterministic() -> None:
     minor = raw(("Курьер обязан подтверждать",), ids=("R-002",), defect=DefectType.NOT_SINGULAR)
     major_late = raw(("получение груза",), ids=("R-002",), defect=DefectType.INCOMPLETE)
     major_early = raw(("Склад должен",), defect=DefectType.AMBIGUOUS)
-    crit = raw(("по заявке",), defect=DefectType.UNVERIFIABLE)
+    crit = raw(("по заявке",), defect=DefectType.UNVERIFIABLE, impact=Impact.HIGH)
     first = run([minor, major_late, major_early, crit])
     second = run([crit, major_early, major_late, minor])
     assert [f.id for f in first.findings] == ["D-001", "D-002", "D-003", "D-004"]
@@ -289,3 +288,62 @@ def test_markdown_emphasis_ignored_and_original_text_returned() -> None:
     assert quote.location.line_start == 7
     assert run([raw(("Система должна хранить",))], document, reqs).findings
     assert not run([raw(("snakecase и всё прочее",))], document, reqs).findings
+
+
+def test_cross_scope_merge_keeps_more_quotes_and_max_severity() -> None:
+    pair = ("Склад должен «оперативно»", "Курьер обязан подтверждать")
+    single = raw(
+        ("«оперативно»  выдавать",),
+        defect=DefectType.INCONSISTENT_TERMS,
+        impact=Impact.HIGH,
+    )
+    wide = raw(
+        pair,
+        ids=("R-001", "R-002"),
+        defect=DefectType.CONTRADICTION,
+        scope=Scope.REQUIREMENT_SET,
+        impact=Impact.LOW,
+    )
+    result = run([single, wide])
+    assert len(result.findings) == 1
+    f = result.findings[0]
+    assert f.defect_type is DefectType.CONTRADICTION
+    assert f.scope is Scope.REQUIREMENT_SET
+    assert f.severity is Severity.MAJOR
+    assert len(f.quotes) == 2
+
+
+def test_cross_group_types_not_merged() -> None:
+    a = raw(("должен «оперативно»",), defect=DefectType.AMBIGUOUS)
+    b = raw(("«оперативно»  выдавать",), defect=DefectType.INCOMPLETE)
+    assert len(run([a, b]).findings) == 2
+
+
+def test_blocker_needs_functional_or_acceptance_quote() -> None:
+    quotes = ("Склад должен «оперативно»", "Курьер обязан подтверждать")
+
+    def severity(kind_a: RequirementKind, kind_b: RequirementKind) -> Severity:
+        reqs = (req(1, F1, kind_a), req(2, F2, kind_b))
+        finding = raw(
+            quotes,
+            ids=("R-001", "R-002"),
+            defect=DefectType.CONTRADICTION,
+            scope=Scope.REQUIREMENT_SET,
+            impact=Impact.HIGH,
+        )
+        return run([finding], DOC, reqs).findings[0].severity
+
+    interface, functional = RequirementKind.INTERFACE, RequirementKind.FUNCTIONAL
+    assert severity(interface, interface) is Severity.CRITICAL
+    assert severity(interface, functional) is Severity.BLOCKER
+
+
+def test_heading_marks_stripped_from_quote() -> None:
+    head = Fragment(
+        id="F-0001",
+        kind=FragmentKind.HEADING,
+        text="Раздел про доставку",
+        location=Location(line_start=1, line_end=1),
+    )
+    result = run([raw(("## Раздел про доставку",), ids=())], doc(head), (req(1, head),))
+    assert result.findings[0].quotes[0].text == "Раздел про доставку"

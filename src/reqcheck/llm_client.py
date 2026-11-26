@@ -10,7 +10,7 @@ import random
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import urlparse
@@ -31,12 +31,14 @@ from reqcheck.llm_providers import (
 
 T = TypeVar("T", bound=BaseModel)
 
-DEFAULT_MODEL = "gemini-3.8-flash"
+DEFAULT_MODELS = "gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-3.8-flash"
 DEFAULT_CACHE_DIR = ".reqcheck_cache"
 TRANSIENT_RETRIES = 2
 BACKOFF_BASE_S = 2.0
 BACKOFF_BUDGET_S = 30.0
-RETRY_AFTER_CAP_S = 60.0
+RETRY_AFTER_CAP_S = 20.0
+PROVIDER_BUDGET_S = 90.0
+STRIKES_TO_SKIP = 3
 _MAX_ERROR_CHARS = 1500
 
 
@@ -45,14 +47,22 @@ class GeminiClient:
 
     def __init__(
         self,
-        primary: Provider,
+        primary: Provider | Sequence[Provider],
         *,
         fallback: Provider | None = None,
         cache: DiskCache | None = None,
         sleep: Callable[[float], None] = time.sleep,
         rng: random.Random | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._primary = primary
+        self._primaries: list[Provider] = (
+            list(primary) if isinstance(primary, Sequence) else [primary]
+        )
+        self._primary = self._primaries[0]
+        self._clock = clock
+        self._skip: set[int] = set()
+        self._strikes: dict[int, int] = {}
+        self._models: list[str] = []
         self._fallback = fallback
         self._cache = cache
         self._sleep = sleep
@@ -68,13 +78,14 @@ class GeminiClient:
 
     def usage(self) -> LLMUsage:
         with self._lock:
-            return LLMUsage(**self._usage)  # type: ignore[arg-type]
+            usage = {**self._usage, "model": ",".join(self._models) or None}
+            return LLMUsage(**usage)  # type: ignore[arg-type]
 
     def complete(self, *, system: str, user: str, response_model: type[T]) -> LLMResult[T]:
         schema = response_model.model_json_schema()
         key = make_cache_key(
             provider=self._primary.name,
-            model=self._primary.model,
+            model=",".join(p.model for p in self._primaries),
             system=system,
             user=user,
             schema=json.dumps(schema, ensure_ascii=False, sort_keys=True),
@@ -83,18 +94,29 @@ class GeminiClient:
         if hit is not None:
             return hit
         reasons: list[str] = []
-        for provider in (self._primary, self._fallback):
-            if provider is None:
-                continue
+        chain = [*self._primaries, *([self._fallback] if self._fallback else [])]
+        live = [p for p in chain if id(p) not in self._skip] or chain
+        for index, provider in enumerate(live):
             try:
-                result = self._run_provider(provider, system, user, schema, response_model)
+                result = self._run_provider(
+                    provider, system, user, schema, response_model, last=index == len(live) - 1
+                )
             except ProviderError as exc:
-                reasons.append(f"{provider.name}: {exc.reason}")
+                reasons.append(f"{provider.model}: {exc.reason}")
+                self._register_failure(provider, exc)
                 continue
-            if self._cache is not None and provider is self._primary and result[1] is not None:
+            self._strikes[id(provider)] = 0
+            if self._cache is not None and provider in self._primaries and result[1] is not None:
                 self._cache.put(key, CacheEntry(text=result[1], model=result[0].model))
             return result[0]
         raise ModelError(self._failure_text(reasons))
+
+    def _register_failure(self, provider: Provider, exc: ProviderError) -> None:
+        """Дневная квота или серия сбоев подряд — модель в этом прогоне больше не пробуем."""
+        strikes = self._strikes.get(id(provider), 0) + 1
+        self._strikes[id(provider)] = strikes
+        if exc.exhausted or strikes >= STRIKES_TO_SKIP:
+            self._skip.add(id(provider))
 
     # --- кэш ---
 
@@ -108,7 +130,7 @@ class GeminiClient:
             return None
         with self._lock:
             self._usage["cache_hits"] += 1
-            self._usage["model"] = entry.model
+            self._note_model(entry.model)
         return LLMResult(data=data, model=entry.model, cached=True)
 
     # --- вызов провайдера ---
@@ -120,11 +142,14 @@ class GeminiClient:
         user: str,
         schema: dict[str, Any],
         response_model: type[T],
+        *,
+        last: bool,
     ) -> tuple[LLMResult[T], str | None]:
         """Запрос с повтором при невалидном ответе; ProviderError — провайдер не помог."""
         prompt = user
+        started = self._clock()
         for attempt in (1, 2):
-            reply = self._call_with_retries(provider, system, prompt, schema)
+            reply = self._call_with_retries(provider, system, prompt, schema, started, last)
             try:
                 data = response_model.model_validate_json(reply.text)
             except ValidationError as exc:
@@ -145,16 +170,26 @@ class GeminiClient:
         raise AssertionError("недостижимо")  # pragma: no cover
 
     def _call_with_retries(
-        self, provider: Provider, system: str, user: str, schema: dict[str, Any]
+        self,
+        provider: Provider,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        started: float,
+        last: bool,
     ) -> ProviderReply:
+        """Повторы с паузой — только у последнего в цепочке; остальные сразу уступают следующему."""
         slept = 0.0
-        for retry in range(TRANSIENT_RETRIES + 1):
+        retries = TRANSIENT_RETRIES if last else 0
+        for retry in range(retries + 1):
+            if self._clock() - started > PROVIDER_BUDGET_S:
+                raise ProviderError("превышено время ожидания ответа модели", retryable=False)
             try:
                 reply = provider.generate(system=system, user=user, schema=schema)
             except ProviderError as exc:
                 self._count_request()
                 delay = self._backoff(exc, retry, slept)
-                if not exc.retryable or retry == TRANSIENT_RETRIES or delay is None:
+                if not exc.retryable or retry == retries or delay is None:
                     raise
                 slept += delay
                 self._sleep(delay)
@@ -171,11 +206,15 @@ class GeminiClient:
         remaining = BACKOFF_BUDGET_S - slept
         return min(delay, remaining) if remaining > 0 else None
 
+    def _note_model(self, model: str) -> None:
+        if model not in self._models:
+            self._models.append(model)
+
     def _count_request(self, reply: ProviderReply | None = None) -> None:
         with self._lock:
             self._usage["requests"] += 1
             if reply is not None:
-                self._usage["model"] = reply.model
+                self._note_model(reply.model)
                 self._usage["tokens_in"] += reply.tokens_in
                 self._usage["tokens_out"] += reply.tokens_out
 
@@ -199,8 +238,9 @@ def create_client_from_env() -> LLMClient | None:
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         return None
-    model = os.environ.get("REQCHECK_MODEL", "").strip() or DEFAULT_MODEL
-    primary = GeminiProvider(api_key, model)
+    raw_models = os.environ.get("REQCHECK_MODEL", "").strip() or DEFAULT_MODELS
+    models = list(dict.fromkeys(m.strip() for m in raw_models.split(",") if m.strip()))
+    primary = [GeminiProvider(api_key, m) for m in models]
     fallback = _fallback_from_env()
     cache = None
     if os.environ.get("REQCHECK_NO_CACHE", "").strip().lower() not in ("1", "true", "yes"):

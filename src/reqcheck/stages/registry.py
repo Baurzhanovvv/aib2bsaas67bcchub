@@ -31,6 +31,7 @@ _ID_RE = re.compile(
 # Обозначения, похожие на идентификатор, но им не являющиеся.
 _NOT_IDS = frozenset(
     {"UTF", "SHA", "ISO", "MD", "AES", "RSA", "TLS", "SSL", "HTTP", "HTTPS", "IPV", "RFC", "ГОСТ"}
+    | {"ФЗ", "ГК", "НК", "ТК", "КОАП", "ПП", "СТ", "СНИП"}
 )
 _MODALITY_RE = re.compile(
     r"\b(?:долж(?:ен|на|но|ны)|необходим\w*|обязан\w*|требуется|не\s+допускается"
@@ -42,7 +43,15 @@ _GWT_SETS = (("given", "when", "then"), ("дано", "когда", "тогда")
 _GWT_START_RE = re.compile(_PREFIX + r"(?:given|дано)\b", _FLAGS)
 _SEPARATOR_RE = re.compile(r"^[\s|:\-–—]+$")
 _REQ_SECTION_RE = re.compile(r"требован|requirement|приёмк|приемк|acceptance|критери", _FLAGS)
-_API_SECTION_RE = re.compile(r"\bapi\b|интерфейс|эндпоинт|endpoint|метод", _FLAGS)
+_API_SECTION_RE = re.compile(
+    r"\b(?:api|rest)\b|эндпоинт|endpoint|программн\w*\s+интерфейс|метод\w*\s+api", _FLAGS
+)
+# Служебные разделы: ревью, согласование, история, глоссарий — не требования.
+_SERVICE_SECTION_RE = re.compile(
+    r"ревью|review|согласующ|согласовани|утвержд|approv|истори\w+\s+изменен|changelog"
+    r"|глоссар|glossary",
+    _FLAGS,
+)
 _ACCEPT_SECTION_RE = re.compile(r"приёмк|приемк|acceptance|критери", _FLAGS)
 _NFR_SECTION_RE = re.compile(r"нефункц|non-?functional", _FLAGS)
 _NFR_TEXT_RE = re.compile(
@@ -51,8 +60,8 @@ _NFR_TEXT_RE = re.compile(
     _FLAGS,
 )
 _ENDPOINT_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+/|эндпоинт|endpoint|\bapi\b", _FLAGS)
+_CELL_ID_RE = re.compile(r"(?P<id>[A-ZА-ЯЁ]{1,5}-\d+(?:\.\d+)*)")
 _FIELD_RE = re.compile(_PREFIX + r"(?:поле|field)\s", _FLAGS)
-_PATH_RE = re.compile(r"(?:^|[\s|`])/[\w{][\w/{}.-]*")
 _SENTENCE_END_RE = re.compile(r"[.!?]\s+(?=[A-ZА-ЯЁ])")
 _MARKUP_RE = re.compile(r"[*_`]+")
 _LEAD_RE = re.compile(r"^[\s>•\-]*(?:\d+[.)]\s+|\[[ xX]\]\s+)?")
@@ -87,7 +96,7 @@ def _extract(fragments: tuple[Fragment, ...]) -> tuple[Requirement, ...]:
     for index, fragment in enumerate(fragments):
         if _is_table_noise(fragments, index):
             continue
-        source_id = _find_source_id(fragment.text)
+        source_id = _find_source_id(fragment.text) or _inherited_id(fragment)
         if not _is_candidate(fragment, source_id):
             continue
         requirements.append(
@@ -122,13 +131,31 @@ def _is_table_noise(fragments: tuple[Fragment, ...], index: int) -> bool:
 
 def _find_source_id(text: str) -> str | None:
     match = _ID_RE.match(text)
-    if match is None:
-        return None
-    raw = match.group("id").strip("[]")
+    if match is not None:
+        return _valid_id(match.group("id"))
+    if "|" in text:
+        for cell in text.split("|"):
+            found = _CELL_ID_RE.fullmatch(cell.strip(" *_`"))
+            if found is not None:
+                return _valid_id(found.group("id"))
+    return None
+
+
+def _valid_id(raw: str) -> str | None:
+    raw = raw.strip("[]")
     prefix = re.match(r"[A-ZА-ЯЁ]+", raw)
     if prefix is not None and prefix.group(0) in _NOT_IDS:
         return None
     return raw
+
+
+def _inherited_id(fragment: Fragment) -> str | None:
+    """Идентификатор из ближайшего заголовка раздела, если он начинается с ID."""
+    for title in reversed(fragment.section):
+        found = _find_source_id(title)
+        if found is not None:
+            return found
+    return None
 
 
 def _section_text(fragment: Fragment) -> str:
@@ -137,6 +164,8 @@ def _section_text(fragment: Fragment) -> str:
 
 def _is_candidate(fragment: Fragment, source_id: str | None) -> bool:
     if fragment.kind in (FragmentKind.HEADING, FragmentKind.CODE):
+        return False
+    if source_id is None and _SERVICE_SECTION_RE.search(_section_text(fragment)):
         return False
     if source_id is not None or _MODALITY_RE.search(fragment.text) or _is_gwt(fragment.text):
         return True
@@ -172,8 +201,7 @@ def _is_interface(fragment: Fragment, section: str) -> bool:
     text = fragment.text
     if _ENDPOINT_RE.search(text) or _FIELD_RE.match(text):
         return True
-    in_api_table = fragment.kind is FragmentKind.TABLE_ROW and _API_SECTION_RE.search(section)
-    return bool(in_api_table and _PATH_RE.search(text))
+    return bool(_API_SECTION_RE.search(section))
 
 
 # --- Краткая формулировка без модели -----------------------------------------------
@@ -234,6 +262,8 @@ def _apply(req: Requirement, refined: tuple[RequirementKind, str] | None) -> Req
     if refined is None:
         return req
     kind, summary = refined
+    if req.kind is RequirementKind.INTERFACE and kind is RequirementKind.FUNCTIONAL:
+        kind = req.kind  # протокольные правила раздела API не становятся функциональными
     return req.model_copy(update={"kind": kind, "summary": summary})
 
 

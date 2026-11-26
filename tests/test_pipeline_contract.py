@@ -20,7 +20,7 @@ EXPECTED_PARAMS = {
     reader.read_document: ["path"],
     registry.build_registry: ["document", "llm"],
     rules.apply_rules: ["document", "requirements"],
-    checks.check_requirements: ["requirements", "llm"],
+    checks.check_requirements: ["requirements", "llm", "document"],
     checks.check_set: ["document", "requirements", "llm"],
     grounding.verify_and_classify: ["document", "requirements", "raw"],
     report.build_report: [
@@ -54,7 +54,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     monkeypatch.setattr(reader, "read_document", lambda path: make_document())
     monkeypatch.setattr(registry, "build_registry", lambda doc, llm: (make_requirement(),))
     monkeypatch.setattr(rules, "apply_rules", lambda doc, reqs: [])
-    monkeypatch.setattr(checks, "check_requirements", lambda reqs, llm: [])
+    monkeypatch.setattr(checks, "check_requirements", lambda reqs, llm, document=None: [])
     monkeypatch.setattr(checks, "check_set", lambda doc, reqs, llm: ([], TraceReport()))
     monkeypatch.setattr(grounding, "verify_and_classify", lambda doc, reqs, raw: GroundingResult())
 

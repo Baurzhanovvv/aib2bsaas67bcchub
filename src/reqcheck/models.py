@@ -181,17 +181,20 @@ class FindingSource(StrEnum):
     MODEL = "model"
 
 
+class Impact(StrEnum):
+    """Последствие дефекта, если не исправить; серьёзность код считает из типа и его.
+
+    HIGH — сделают не то или не проверят ключевое поведение (деньги, доступ, данные);
+    MEDIUM — уточнения у заказчика, возможна переделка; LOW — оформление, мелочь."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
 class ModelFinding(Contract):
-    """Замечание в том виде, в каком его возвращает модель.
-
-    Цитата обязательна всегда, в том числе для пропуска (MISSING_REQUIREMENT,
-    UNTRACEABLE): тогда цитируется место, из которого пропуск следует, —
-    требование, которое без недостающего нельзя реализовать или проверить.
-    Задание требует, чтобы каждое нарушение ссылалось на место в документе.
-
-    requirement_ids может содержать id, которых нет в реестру: этап, который
-    создаёт RawFinding, обязан их отбросить, иначе отчёт не соберётся.
-    """
+    """Замечание модели или правила. Цитата обязательна всегда — у пропуска это место,
+    из которого он следует. Id вне реестра отбрасывает этап, создающий RawFinding."""
 
     defect_type: DefectType
     requirement_ids: tuple[RequirementId, ...] = ()
@@ -199,6 +202,7 @@ class ModelFinding(Contract):
     """Дословные цитаты из документа. Для противоречия — обе стороны."""
     explanation: str = Field(min_length=1)
     suggestion: str | None = None
+    impact: Impact = Impact.MEDIUM
 
     @model_validator(mode="after")
     def _check(self) -> "ModelFinding":

@@ -69,7 +69,7 @@ def test_decide_verdict_incomplete_flag() -> None:
     assert decide_verdict((), complete=False) is Verdict.CONDITIONAL_GO
 
 
-def test_fix_first_blockers_then_criticals_by_id_max_seven() -> None:
+def test_fix_first_blockers_then_criticals_by_id_max_ten() -> None:
     findings = (
         finding("D-001", Severity.CRITICAL),
         finding("D-002", Severity.MAJOR),
@@ -78,8 +78,8 @@ def test_fix_first_blockers_then_criticals_by_id_max_seven() -> None:
         finding("D-005", Severity.BLOCKER),
     )
     assert build(findings).fix_first == ("D-003", "D-005", "D-001", "D-004")
-    many = tuple(finding(f"D-{i:03d}", Severity.CRITICAL) for i in range(1, 12))
-    assert build(many).fix_first == tuple(f"D-{i:03d}" for i in range(1, 8))
+    many = tuple(finding(f"D-{i:03d}", Severity.CRITICAL) for i in range(1, 14))
+    assert build(many).fix_first == tuple(f"D-{i:03d}" for i in range(1, 11))
 
 
 def test_summary_counts() -> None:

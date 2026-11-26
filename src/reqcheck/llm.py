@@ -9,7 +9,7 @@ from typing import Generic, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from reqcheck.models import Contract, DefectType, RequirementKind
+from reqcheck.models import Contract, DefectType, Impact, RequirementKind
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -89,6 +89,7 @@ class FindingDraft(Draft):
     quotes: tuple[str, ...] = ()
     explanation: str = ""
     suggestion: str | None = None
+    impact: Impact = Impact.MEDIUM
 
 
 class LinkDraft(Draft):

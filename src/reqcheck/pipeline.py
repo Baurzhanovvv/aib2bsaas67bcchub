@@ -22,7 +22,7 @@ def _model_checks(
     """Проверки моделью. При сбое — то, что успели, и текст причины."""
     found: list[RawFinding] = []
     try:
-        found += checks.check_requirements(requirements, llm)
+        found += checks.check_requirements(requirements, llm, document=document)
         set_findings, trace = checks.check_set(document, requirements, llm)
     except ModelError as error:
         return found, None, error.message

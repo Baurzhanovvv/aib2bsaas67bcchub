@@ -18,7 +18,7 @@ from reqcheck.models import (
 )
 from reqcheck.version import agent_version
 
-MAX_FIX_FIRST = 7
+MAX_FIX_FIRST = 10
 CRITICAL_SEVERITIES = (Severity.BLOCKER, Severity.CRITICAL)
 
 

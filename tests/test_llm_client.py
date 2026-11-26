@@ -138,13 +138,21 @@ def test_cache_write_failure_leaves_no_tmp(tmp_path: Path, monkeypatch: pytest.M
 
 def test_429_falls_back_to_second_provider() -> None:
     quota = ProviderError("исчерпана квота (429)", retryable=True)
-    primary = FakeProvider([quota, quota, quota])
+    primary = FakeProvider([quota])
     fallback = FakeProvider([GOOD], name="alt")
     client = make(primary, fallback=fallback)
     assert ask(client).data.title == "Доставка"
-    assert len(primary.calls) == 3 and len(fallback.calls) == 1
+    assert len(primary.calls) == 1 and len(fallback.calls) == 1
+    assert client.sleeps == []  # type: ignore[attr-defined]  # есть куда уйти — не ждём
+    assert client.usage().requests == 2
+
+
+def test_last_provider_retries_with_bounded_pauses() -> None:
+    quota = ProviderError("429", retryable=True)
+    client = make(FakeProvider([quota, quota, quota]))
+    with pytest.raises(ModelError):
+        ask(client)
     assert len(client.sleeps) == 2 and sum(client.sleeps) <= 30  # type: ignore[attr-defined]
-    assert client.usage().requests == 4
 
 
 def test_retry_after_respected_and_long_one_skips_to_fallback() -> None:
@@ -170,10 +178,12 @@ def test_non_retryable_error_does_not_sleep() -> None:
 
 def test_both_providers_down_gives_clear_error() -> None:
     err = ProviderError("нет связи (сеть)", retryable=False)
-    client = make(FakeProvider([err]), fallback=FakeProvider([err], name="alt"))
+    client = make(
+        FakeProvider([err], model="m-a"), fallback=FakeProvider([err], name="alt", model="m-b")
+    )
     with pytest.raises(ModelError) as info:
         ask(client)
-    assert "fake: нет связи" in info.value.message and "alt: нет связи" in info.value.message
+    assert "m-a: нет связи" in info.value.message and "m-b: нет связи" in info.value.message
 
 
 def test_cache_second_call_skips_provider(tmp_path: Path) -> None:
@@ -282,3 +292,89 @@ def test_oversized_fallback_response_is_provider_error(monkeypatch: pytest.Monke
     prov = OpenAICompatProvider("https://x.example/v1", "k", "m")
     with pytest.raises(ProviderError, match="слишком большой"):
         prov.generate(system="s", user="u", schema={})
+
+
+def test_model_chain_skips_daily_exhausted_model_and_reports_models() -> None:
+    daily = ProviderError("429 суточная", retryable=True, exhausted=True)
+    a = FakeProvider([daily], model="m-a")
+    b = FakeProvider([GOOD, GOOD], model="m-b")
+    client = GeminiClient([a, b], sleep=lambda _: None)
+    client.complete(system="s", user="1", response_model=Ticket)
+    client.complete(system="s", user="2", response_model=Ticket)
+    assert len(a.calls) == 1  # вторую модель дёрнули, первую больше не пробуем
+    assert client.usage().model == "api-model-1"
+
+
+def test_usage_lists_every_model_that_answered() -> None:
+    class Named(FakeProvider):
+        def generate(self, **kw: object) -> ProviderReply:  # type: ignore[override]
+            r = super().generate(**kw)  # type: ignore[arg-type]
+            return ProviderReply(r.text, self.model, 1, 1)
+
+    a = Named(
+        [
+            ProviderError("503", retryable=True),
+        ],
+        model="m-a",
+    )
+    b = Named([GOOD], model="m-b")
+    a2 = Named([GOOD], model="m-a")
+    client = GeminiClient([a, b], sleep=lambda _: None)
+    client.complete(system="s", user="1", response_model=Ticket)
+    client._primaries[0] = a2  # type: ignore[attr-defined]
+    client.complete(system="s", user="2", response_model=Ticket)
+    assert client.usage().model == "m-b,m-a"
+
+
+def test_three_failures_in_a_row_skip_model() -> None:
+    bad = ProviderError("503", retryable=True)
+    a = FakeProvider([bad, bad, bad], model="m-a")
+    b = FakeProvider([GOOD] * 4, model="m-b")
+    client = GeminiClient([a, b], sleep=lambda _: None)
+    for i in range(4):
+        client.complete(system="s", user=str(i), response_model=Ticket)
+    assert len(a.calls) == 3
+
+
+def test_long_retry_after_moves_to_next_model_without_sleep() -> None:
+    a = FakeProvider([ProviderError("429", retryable=True, retry_after=21)], model="m-a")
+    b = FakeProvider([GOOD], model="m-b")
+    client = make(a, fallback=b)
+    ask(client)
+    assert client.sleeps == []  # type: ignore[attr-defined]
+
+
+def test_provider_time_budget_is_enforced() -> None:
+    now = [0.0]
+
+    def clock() -> float:
+        return now[0]
+
+    def tick(delay: float) -> None:
+        now[0] += delay
+
+    transient = ProviderError("сеть", retryable=True, retry_after=15)
+    p = FakeProvider([transient, transient, GOOD])
+    client = GeminiClient(p, sleep=lambda d: tick(d + 50), clock=clock)
+    with pytest.raises(ModelError, match="превышено время"):
+        ask(client)
+    assert len(p.calls) == 2
+
+
+def test_simplify_schema_inlines_refs_keeps_field_named_title() -> None:
+    from reqcheck.llm_providers import simplify_schema
+
+    out = simplify_schema(Ticket2.model_json_schema())
+    text = str(out)
+    assert "$ref" not in text and "$defs" not in text and "'default'" not in text
+    assert "title" in out["properties"]  # поле с именем title не потеряно
+    assert out["properties"]["inner"]["properties"]["x"]["type"] == "integer"
+
+
+class Inner(BaseModel):
+    x: int = 0
+
+
+class Ticket2(BaseModel):
+    title: str
+    inner: Inner

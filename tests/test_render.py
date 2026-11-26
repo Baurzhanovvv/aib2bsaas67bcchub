@@ -225,3 +225,30 @@ def test_model_error_warnings() -> None:
     assert "без модели" not in text
     assert text.count("проверка моделью прервана") >= 3
     assert "Ограничение: проверка моделью прервана (исчерпана квота)" in text
+
+
+def test_brief_block_first() -> None:
+    blocker = with_finding(id="D-001", severity=Severity.BLOCKER)
+    report = make_report(findings=(blocker,), fix_first=("D-001",))
+    text = render_markdown(report)
+    assert text.index("## Кратко") < text.index("## 1. Паспорт прогона")
+    brief = text[text.index("## Кратко") : text.index("## 1.")]
+    assert "Начинать разработку нельзя" in brief
+    assert "D-001, Непроверяемость, R-001: Нет измеримого порога." in brief
+
+
+def test_markup_stripped_from_quotes_and_legend() -> None:
+    quote = Quote(
+        text="должна **быстро** `работать`__всегда__", location=Location(line_start=3, line_end=3)
+    )
+    text = render_markdown(make_report(findings=(with_finding(quotes=(quote,)),)))
+    assert "> должна быстро работатьвсегда" in text
+    assert "**быстро**" not in text
+    assert "Цитаты приведены без Markdown-разметки" in text
+
+
+def test_findings_sorted_by_id_and_fix_first_overflow() -> None:
+    fs = tuple(with_finding(id=f"D-{i:03d}", severity=Severity.CRITICAL) for i in (3, 1, 2))
+    text = render_markdown(make_report(findings=fs, fix_first=("D-001",)))
+    assert text.index("#### D-001") < text.index("#### D-002") < text.index("#### D-003")
+    assert "И ещё 2, см. раздел 5." in text

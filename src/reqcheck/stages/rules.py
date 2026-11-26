@@ -9,6 +9,7 @@ from reqcheck.models import (
     Document,
     FindingSource,
     FragmentKind,
+    Impact,
     RawFinding,
     Requirement,
     Scope,
@@ -91,6 +92,7 @@ def _finding(
     quotes: tuple[str, ...],
     explanation: str,
     suggestion: str,
+    impact: Impact,
     scope: Scope = Scope.REQUIREMENT,
 ) -> RawFinding | None:
     if not quotes:
@@ -102,6 +104,7 @@ def _finding(
         explanation=explanation,
         suggestion=suggestion,
         scope=scope,
+        impact=impact,
         source=FindingSource.RULE,
         rule_id=rule_id,
     )
@@ -151,6 +154,8 @@ def rule_vague(req: Requirement) -> RawFinding | None:
         "понимают по-разному и не могут проверить тестом (ISO/IEC/IEEE 29148, 5.2.5: "
         "однозначность и верифицируемость).",
         "Заменить оценочные слова числом с единицей измерения или перечислить все случаи явно.",
+        # Признак: оценочное слово про измеримое свойство (время, объём, частота) — MEDIUM.
+        Impact.MEDIUM if measurable else Impact.LOW,
     )
 
 
@@ -184,6 +189,7 @@ def rule_tbd(req: Requirement, is_row: bool) -> RawFinding | None:
         "«???», пустая ячейка). Требование неполно: его нельзя реализовать и проверить "
         "(ISO/IEC/IEEE 29148, 5.2.5: полнота).",
         "Указать конкретное значение или вынести вопрос в список открытых с ответственным.",
+        Impact.MEDIUM,
     )
 
 
@@ -218,6 +224,7 @@ def rule_http_safe_method(req: Requirement) -> RawFinding | None:
         "(ISO/IEC/IEEE 29148, 5.2.5: корректность).",
         "Использовать POST, PUT, PATCH или DELETE для изменения состояния, "
         "а GET оставить для чтения.",
+        Impact.HIGH,
     )
 
 
@@ -240,6 +247,7 @@ def rule_http_error_200(req: Requirement) -> RawFinding | None:
         "ориентирующийся на код, примет сбой за успех (ISO/IEC/IEEE 29148, 5.2.5: "
         "корректность и однозначность).",
         "Возвращать для ошибки код 4xx или 5xx, соответствующий её причине.",
+        Impact.HIGH,
     )
 
 
@@ -290,6 +298,7 @@ def rule_undefined_ref(req: Requirement, ids: set[str], prefixes: set[str]) -> R
         "Требование нельзя проследить до источника (ISO/IEC/IEEE 29148, 5.2.6: "
         "прослеживаемость и согласованность набора).",
         "Исправить идентификатор ссылки или добавить требование, на которое она указывает.",
+        Impact.MEDIUM,
         scope=Scope.REQUIREMENT_SET,
     )
 

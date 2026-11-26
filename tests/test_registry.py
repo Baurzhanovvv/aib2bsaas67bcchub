@@ -241,3 +241,85 @@ def test_multiline_paragraph_summary() -> None:
     req = build_registry(doc(frag(1, K.PARAGRAPH, text)), None)[0]
     assert req.summary == "Система должна печатать накладную"
     assert req.quote == text
+
+
+def test_source_id_inherited_from_heading() -> None:
+    fragments = doc(
+        frag(1, K.HEADING, "US-7 Возврат товара", "Истории", "US-7 Возврат товара"),
+        frag(2, K.PARAGRAPH, "Покупатель оформляет возврат.", "Истории", "US-7 Возврат товара"),
+    )
+    reqs = build_registry(fragments, None)
+    assert [(r.fragment_id, r.source_id) for r in reqs] == [("F-0002", "US-7")]
+
+
+def test_id_in_non_first_table_cell() -> None:
+    fragments = doc(frag(1, K.TABLE_ROW, "| 1 | **REQ-9** | Отчёт выгружается |", "Требования"))
+    assert build_registry(fragments, None)[0].source_id == "REQ-9"
+
+
+def test_review_checklist_sections_are_skipped() -> None:
+    fragments = doc(
+        frag(1, K.TABLE_ROW, "| Требование проверено | Да / Нет |", "Ревью требований"),
+        frag(2, K.PARAGRAPH, "Согласующий должен подписать.", "Блок согласующих"),
+    )
+    assert build_registry(fragments, None) == ()
+
+
+def test_parameter_rows_in_api_section_are_interface() -> None:
+    fragments = doc(
+        frag(
+            1,
+            K.TABLE_ROW,
+            "| `weight` | integer | Да | Масса в граммах |",
+            "Интерфейс складского сервиса (REST)",
+        ),
+    )
+    assert build_registry(fragments, None)[0].kind is RequirementKind.INTERFACE
+
+
+def test_any_fragment_in_api_section_is_interface() -> None:
+    fragments = doc(
+        frag(1, K.PARAGRAPH, "Заголовок авторизации должен присутствовать.", "Склад REST"),
+        frag(2, K.LIST_ITEM, "Система должна вернуть код ошибки.", "Склад REST", "Ответ"),
+        frag(3, K.LIST_ITEM, "Дано токен. Когда запрос, тогда ответ.", "REST API", "Критерии"),
+    )
+    kinds = [r.kind for r in build_registry(fragments, None)]
+    assert kinds == [
+        RequirementKind.INTERFACE,
+        RequirementKind.INTERFACE,
+        RequirementKind.ACCEPTANCE,
+    ]
+
+
+def test_llm_cannot_turn_interface_into_functional() -> None:
+    fragments = doc(frag(1, K.PARAGRAPH, "Система должна вернуть код ошибки.", "REST API"))
+    llm = FakeLLM(
+        (RequirementRefinement(id="R-001", kind=RequirementKind.FUNCTIONAL, summary="Код ошибки"),)
+    )
+    req = build_registry(fragments, llm)[0]
+    assert req.kind is RequirementKind.INTERFACE
+    assert req.summary == "Код ошибки"
+
+
+def test_business_sections_with_method_or_ui_words_are_not_interface() -> None:
+    fragments = doc(
+        frag(1, K.PARAGRAPH, "Система должна списывать комиссию.", "ТЗ", "Методы оплаты"),
+        frag(2, K.PARAGRAPH, "Кнопка должна быть активна.", "ТЗ", "Пользовательский интерфейс"),
+        frag(3, K.PARAGRAPH, "Система должна вернуть ошибку.", "ТЗ", "Методы API"),
+        frag(4, K.PARAGRAPH, "Система должна вернуть ошибку.", "ТЗ", "Программный интерфейс"),
+    )
+    kinds = [r.kind for r in build_registry(fragments, None)]
+    assert kinds == [
+        RequirementKind.FUNCTIONAL,
+        RequirementKind.FUNCTIONAL,
+        RequirementKind.INTERFACE,
+        RequirementKind.INTERFACE,
+    ]
+
+
+def test_regulation_designations_are_not_ids_or_requirements() -> None:
+    fragments = doc(
+        frag(1, K.TABLE_ROW, "| ФЗ-152 | персональные данные |", "Нормативная база"),
+        frag(2, K.PARAGRAPH, "ФЗ-152 регулирует обработку данных.", "Нормативная база"),
+    )
+    assert build_registry(fragments, None) == ()

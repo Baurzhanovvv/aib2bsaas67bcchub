@@ -1,74 +1,23 @@
 """Отчёт в Markdown: шесть разделов задания (FR-10). PDF и HTML — FR-22."""
 
+import re
 from collections import defaultdict
 from datetime import datetime
 
 from reqcheck.models import (
-    Criterion,
-    DefectType,
     Finding,
     Location,
     Report,
-    RequirementKind,
     RunMode,
     Scope,
     Severity,
     Verdict,
 )
+from reqcheck.stages.render_labels import CRITERION_RU, DEFECT_RU, KIND_RU, SEVERITY_RU
 
 TABLE_QUOTE_LIMIT = 100
-
-DEFECT_RU: dict[DefectType, str] = {
-    DefectType.AMBIGUOUS: "Неоднозначность",
-    DefectType.UNVERIFIABLE: "Непроверяемость",
-    DefectType.INCOMPLETE: "Неполнота",
-    DefectType.NOT_SINGULAR: "Неатомарность",
-    DefectType.INFEASIBLE: "Невыполнимость",
-    DefectType.DESIGN_CONSTRAINT: "Подмена требования решением",
-    DefectType.UNDEFINED_REFERENCE: "Неопределённая ссылка",
-    DefectType.INTERFACE_MISUSE: "Некорректное описание интерфейса",
-    DefectType.CONTRADICTION: "Противоречие",
-    DefectType.MISSING_REQUIREMENT: "Пропущенное требование",
-    DefectType.DUPLICATE: "Дублирование",
-    DefectType.INCONSISTENT_TERMS: "Несогласованные термины",
-    DefectType.UNTRACEABLE: "Отсутствие трассировки",
-}
-
-SEVERITY_RU: dict[Severity, str] = {
-    Severity.BLOCKER: "блокирующее",
-    Severity.CRITICAL: "критичное",
-    Severity.MAJOR: "существенное",
-    Severity.MINOR: "незначительное",
-}
-
-CRITERION_RU: dict[Criterion, str] = {
-    Criterion.REQ_NECESSARY: "необходимость",
-    Criterion.REQ_APPROPRIATE: "уместность",
-    Criterion.REQ_UNAMBIGUOUS: "однозначность",
-    Criterion.REQ_COMPLETE: "полнота",
-    Criterion.REQ_SINGULAR: "атомарность",
-    Criterion.REQ_FEASIBLE: "выполнимость",
-    Criterion.REQ_VERIFIABLE: "проверяемость",
-    Criterion.REQ_CORRECT: "корректность",
-    Criterion.REQ_CONFORMING: "соответствие шаблону",
-    Criterion.SET_COMPLETE: "полнота набора",
-    Criterion.SET_CONSISTENT: "согласованность набора",
-    Criterion.SET_FEASIBLE: "выполнимость набора",
-    Criterion.SET_COMPREHENSIBLE: "понятность набора",
-    Criterion.SET_VALIDATABLE: "валидируемость набора",
-    Criterion.SRS_TRACEABLE: "трассируемость",
-    Criterion.SRS_RANKED: "ранжирование по важности",
-    Criterion.SRS_MODIFIABLE: "изменяемость",
-}
-
-KIND_RU: dict[RequirementKind, str] = {
-    RequirementKind.FUNCTIONAL: "функциональное",
-    RequirementKind.NON_FUNCTIONAL: "нефункциональное",
-    RequirementKind.INTERFACE: "интерфейсное",
-    RequirementKind.ACCEPTANCE: "критерий приёмки",
-    RequirementKind.CONSTRAINT: "ограничение",
-    RequirementKind.OTHER: "прочее",
-}
+BRIEF_TOP = 5
+BRIEF_EXPLANATION_LIMIT = 120
 
 _INCOMPLETE = "отчёт неполный, набор требований не проверен моделью."
 _INTERRUPTED = "ВНИМАНИЕ: проверка моделью прервана, " + _INCOMPLETE
@@ -90,8 +39,16 @@ def _inline(text: str) -> str:
     return " ".join(text.split())
 
 
+_MARKUP = re.compile(r"\*\*|__|`")
+
+
+def _plain(text: str) -> str:
+    """Убрать Markdown-выделение (**, __, обратные кавычки); слова остаются дословными."""
+    return _MARKUP.sub("", text)
+
+
 def _short(text: str, limit: int = TABLE_QUOTE_LIMIT) -> str:
-    flat = " ".join(text.split())
+    flat = " ".join(_plain(text).split())
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
@@ -111,7 +68,8 @@ def _table(header: tuple[str, ...], rows: list[tuple[str, ...]]) -> list[str]:
 
 
 def _blockquote(text: str) -> list[str]:
-    return ["> " + line if line.strip() else ">" for line in text.strip().splitlines()]
+    lines = _plain(text).strip().splitlines()
+    return ["> " + line if line.strip() else ">" for line in lines]
 
 
 def _pages(pages: tuple[int, ...]) -> str:
@@ -166,7 +124,8 @@ def _passport(report: Report) -> list[str]:
                 "проверка неполная",
             )
         )
-    return ["## 1. Паспорт прогона", "", *_table(("Параметр", "Значение"), rows)]
+    legend = "Цитаты приведены без Markdown-разметки; место — строка исходного файла."
+    return ["## 1. Паспорт прогона", "", *_table(("Параметр", "Значение"), rows), "", legend]
 
 
 def _registry(report: Report) -> list[str]:
@@ -219,6 +178,9 @@ def _per_requirement(report: Report) -> list[str]:
             by_req[f.requirement_ids[0]].append(f)
         else:
             detached.append(f)
+    for items in by_req.values():
+        items.sort(key=lambda f: f.id)
+    detached.sort(key=lambda f: f.id)
     for req in report.requirements:
         if req.id not in by_req:
             continue
@@ -266,7 +228,9 @@ def _set_check(report: Report) -> list[str]:
         out += [_INTERRUPTED, ""]
     if not report.set_check_done:
         out += ["Не выполнялась: противоречия и пробелы набора не искались.", ""]
-    set_findings = [f for f in report.findings if f.scope is Scope.REQUIREMENT_SET]
+    set_findings = sorted(
+        (f for f in report.findings if f.scope is Scope.REQUIREMENT_SET), key=lambda f: f.id
+    )
     for f in set_findings:
         out += _finding_block(f)
     if report.set_check_done and not set_findings:
@@ -291,7 +255,7 @@ def _summary(report: Report) -> list[str]:
         out.append(f"  - {SEVERITY_RU[sev]}: {s.by_severity.get(sev, 0)}")
     out += ["", "Критичные дефекты (блокирующие и критичные):", ""]
     rows = []
-    for fid in s.critical_finding_ids:
+    for fid in sorted(s.critical_finding_ids):
         f = by_id[fid]
         rows.append(
             (
@@ -346,6 +310,31 @@ def _verdict(report: Report) -> list[str]:
         f = by_id[fid]
         action = _inline(f.suggestion) if f.suggestion else _inline(f.explanation)
         out.append(f"{n}. {f.id} ({_finding_target(f)}): {action}")
+    rest = len(report.summary.critical_finding_ids) - len(report.fix_first)
+    if rest > 0:
+        out.append(f"И ещё {rest}, см. раздел 5.")
+    return out
+
+
+def _brief(report: Report) -> list[str]:
+    s = report.summary
+    by_id = {f.id: f for f in report.findings}
+    counts = ", ".join(f"{SEVERITY_RU[v]}: {s.by_severity.get(v, 0)}" for v in SEVERITY_ORDER)
+    out = [
+        "## Кратко",
+        "",
+        f"**{_verdict_text(report)}**",
+        "",
+        f"Требований: {s.requirements_total}; замечаний: {s.findings_total} ({counts}).",
+    ]
+    top = [by_id[i] for i in report.fix_first[:BRIEF_TOP]]
+    if top:
+        out += ["", "Главные дефекты:", ""]
+        out += [
+            f"- {f.id}, {DEFECT_RU[f.defect_type]}, {_finding_target(f)}: "
+            f"{_short(f.explanation, BRIEF_EXPLANATION_LIMIT)}"
+            for f in top
+        ]
     return out
 
 
@@ -355,6 +344,7 @@ def render_markdown(report: Report) -> str:
     """
     sections = [
         ["# Отчёт о проверке требований", ""],
+        _brief(report),
         _passport(report),
         _registry(report),
         _per_requirement(report),

@@ -1,6 +1,5 @@
 """Проверка цитат (FR-7), справочник разметки (FR-9), дедупликация (FR-16)."""
 
-import unicodedata
 from dataclasses import dataclass, replace
 
 from reqcheck import taxonomy
@@ -11,6 +10,7 @@ from reqcheck.models import (
     Finding,
     FindingSource,
     Fragment,
+    FragmentKind,
     GroundingResult,
     Location,
     Quote,
@@ -20,106 +20,13 @@ from reqcheck.models import (
     Scope,
     Severity,
 )
-
-_QUOTE_CHARS = "«»„“”‟‹›〝〞\"'‘’‚‛"
-_DASH_CHARS = "‐‑‒–—―−⁃﹘﹣－-"
-_INVISIBLE = "­​‌‍⁠﻿"
-# Разметка выделения Markdown: `*` и обратные кавычки убираем всегда, `_` только серией `__`
-# (одиночный `_` бывает внутри идентификаторов вроде snake_case).
-_MARKUP = "*`"
-_LINE_BREAKS = "\n\r\x0b\x0c  \x85"
-
-# --- Нормализация с картой индексов ---------------------------------------------
-
-
-@dataclass(frozen=True)
-class _Norm:
-    text: str
-    starts: tuple[int, ...]
-    ends: tuple[int, ...]
-
-
-def _clusters(text: str) -> list[tuple[str, int, int]]:
-    """Символ вместе с комбинирующими знаками, чтобы NFKC не ломал «й», «ё»."""
-    result: list[tuple[str, int, int]] = []
-    for index, char in enumerate(text):
-        if result and unicodedata.combining(char):
-            prev, start, _ = result[-1]
-            result[-1] = (prev + char, start, index + 1)
-        else:
-            result.append((char, index, index + 1))
-    return result
-
-
-def _map_char(char: str) -> str:
-    if char in _QUOTE_CHARS:
-        return '"'
-    if char in _DASH_CHARS:
-        return "-"
-    return char
-
-
-def _double_underscores(text: str) -> set[int]:
-    """Индексы символов `_` в сериях из двух и более подряд (маркеры выделения)."""
-    skipped: set[int] = set()
-    i = 0
-    while i < len(text):
-        j = i
-        while j < len(text) and text[j] == "_":
-            j += 1
-        if j - i >= 2:
-            skipped.update(range(i, j))
-        i = max(j, i + 1)
-    return skipped
-
-
-def _tokens(text: str) -> list[list]:
-    """[символ, начало, конец, был_перенос]; пробельные серии схлопнуты в один пробел."""
-    tokens: list[list] = []
-    skipped = _double_underscores(text)
-    for cluster, start, end in _clusters(text):
-        for char in unicodedata.normalize("NFKC", cluster):
-            if char in _INVISIBLE or char in _MARKUP or start in skipped:
-                continue
-            if char.isspace():
-                if tokens and tokens[-1][0] == " ":
-                    tokens[-1][2] = end
-                    tokens[-1][3] = tokens[-1][3] or char in _LINE_BREAKS
-                else:
-                    tokens.append([" ", start, end, char in _LINE_BREAKS])
-            else:
-                tokens.append([_map_char(char), start, end, False])
-    return tokens
-
-
-def _is_wrapped_hyphen(tokens: list[list], i: int) -> bool:
-    """«требова-\\nние»: дефис между буквами на конце строки склеивает слово."""
-    if tokens[i][0] != "-" or i == 0 or i + 2 >= len(tokens):
-        return False
-    gap, after = tokens[i + 1], tokens[i + 2]
-    return tokens[i - 1][0].isalpha() and gap[0] == " " and gap[3] and after[0].islower()
-
-
-def normalize(text: str) -> _Norm:
-    tokens = _tokens(text)
-    kept: list[list] = []
-    i = 0
-    while i < len(tokens):
-        if _is_wrapped_hyphen(tokens, i):
-            i += 2
-            continue
-        kept.append(tokens[i])
-        i += 1
-    return _Norm(
-        "".join(t[0] for t in kept),
-        tuple(t[1] for t in kept),
-        tuple(t[2] for t in kept),
-    )
-
-
-def _norm_text(text: str) -> str:
-    return normalize(text).text.strip()
-
+from reqcheck.text_norm import (
+    match_adjacent_cells,
+    norm_text,
+    normalize,
+    strip_heading_marks,
+    table_segments,
+)
 
 # --- Поиск цитат ----------------------------------------------------------------
 
@@ -147,29 +54,64 @@ class _Index:
         for req in requirements:
             self._owners.setdefault(req.fragment_id, []).append(req.id)
 
-    def _order(self, ids: tuple[str, ...]) -> list[int]:
+    def _order(self, ids: tuple[str, ...], near: bool = False) -> list[int]:
+        """Сначала фрагменты требований из ids, затем (near) соседние ±2, затем остальные."""
         first = [
             self._position[self.by_id[i].fragment_id]
             for i in ids
             if i in self.by_id and self.by_id[i].fragment_id in self._position
         ]
-        first = list(dict.fromkeys(first))
-        return first + [i for i in range(len(self._fragments)) if i not in first]
+        order = list(dict.fromkeys(first))
+        if near:
+            around = sorted({j for i in order for j in range(i - 2, i + 3)})
+            order += [j for j in around if 0 <= j < len(self._fragments) and j not in order]
+        return order + [i for i in range(len(self._fragments)) if i not in order]
 
     def _owner(self, fragment: Fragment, ids: tuple[str, ...]) -> str | None:
         owners = self._owners.get(fragment.id, [])
         return next((o for o in owners if o in ids), owners[0] if owners else None)
 
-    def find(self, quote: str, ids: tuple[str, ...]) -> _Hit | None:
-        needle = _norm_text(quote)
+    def find(self, quote: str, ids: tuple[str, ...]) -> list[_Hit]:
+        """Найти цитату; пустой список — не найдена. Составная цитата даёт несколько мест."""
+        quote = strip_heading_marks(quote)
+        whole = self._find_exact(norm_text(quote), ids)
+        if whole is not None:
+            return [whole]
+        return self._find_composite(quote, ids) or self._find_table_row(norm_text(quote), ids)
+
+    def _find_exact(self, needle: str, ids: tuple[str, ...], near: bool = False) -> _Hit | None:
         if not needle:
             return None
-        for index in self._order(ids):
-            norm = self._norms[index]
-            pos = norm.text.find(needle)
+        for index in self._order(ids, near):
+            pos = self._norms[index].text.find(needle)
             if pos >= 0:
                 return self._hit(index, pos, pos + len(needle), needle, ids)
         return None
+
+    def _find_composite(self, quote: str, ids: tuple[str, ...]) -> list[_Hit]:
+        """Два места, склеенные моделью через перевод строки: части ищем рядом с требованием."""
+        parts = list(dict.fromkeys(norm_text(p) for p in quote.split("\n") if p.strip()))
+        if len(parts) < 2 or any(len(p) < MIN_QUOTE_LENGTH for p in parts):
+            return []
+        hits = [self._find_exact(p, ids, near=True) for p in parts]
+        if not all(hits):
+            return []
+        unique = {(h.fragment_index, h.start, h.end): h for h in hits if h}
+        return list(unique.values())
+
+    def _find_table_row(self, needle: str, ids: tuple[str, ...]) -> list[_Hit]:
+        """«ключ: значение» вместо строки таблицы: сегменты в соседних ячейках одной строки."""
+        segments = table_segments(needle)
+        if not segments:
+            return []
+        for index in self._order(ids):
+            if self._fragments[index].kind is not FragmentKind.TABLE_ROW:
+                continue
+            span = match_adjacent_cells(self._norms[index].text, segments)
+            if span is not None:
+                hit = self._hit(index, span[0], span[1], needle, ids)
+                return [hit] if hit else []
+        return []
 
     def _hit(self, index: int, pos: int, stop: int, key: str, ids: tuple[str, ...]) -> _Hit | None:
         fragment, norm = self._fragments[index], self._norms[index]
@@ -185,6 +127,8 @@ class _Index:
         )
         return _Hit(text, location, self._owner(fragment, ids), index, pos, stop, key)
 
+
+MERGE_OVERLAP = 0.5
 
 # --- Кандидаты, дедупликация ----------------------------------------------------
 
@@ -206,16 +150,21 @@ def _rank(severity: Severity) -> int:
     return taxonomy.SEVERITY_ORDER.index(severity)
 
 
+def _kinds(hits: tuple[_Hit, ...], index: _Index) -> set[RequirementKind]:
+    reqs = (index.by_id.get(h.requirement_id or "") for h in hits)
+    return {r.kind for r in reqs if r is not None}
+
+
 def _severity(raw: RawFinding, hits: tuple[_Hit, ...], index: _Index) -> Severity:
-    severity = taxonomy.TAXONOMY[raw.defect_type].severity
-    if (
-        taxonomy.PROMOTE_ACCEPTANCE_TO_BLOCKER
-        and raw.defect_type in taxonomy.ACCEPTANCE_PROMOTED_TYPES
-    ):
-        for hit in hits:
-            req = index.by_id.get(hit.requirement_id or "")
-            if req is not None and req.kind is RequirementKind.ACCEPTANCE:
-                return Severity.BLOCKER
+    severity = taxonomy.severity_for(raw.defect_type, raw.impact)
+    kinds = _kinds(hits, index)
+    promote = taxonomy.PROMOTE_ACCEPTANCE_TO_BLOCKER
+    if promote and raw.defect_type in taxonomy.ACCEPTANCE_PROMOTED_TYPES:
+        if RequirementKind.ACCEPTANCE in kinds:
+            return Severity.BLOCKER
+    # Блокирует разработку расхождение в бизнес-поведении, а не в оформлении протокола.
+    if severity is Severity.BLOCKER and not kinds & taxonomy.BLOCKER_REQUIREMENT_KINDS:
+        return Severity.CRITICAL
     return severity
 
 
@@ -230,23 +179,23 @@ def _is_noop_suggestion(cand: _Cand, index: _Index) -> bool:
 
 
 def _canon(text: str) -> str:
-    return _norm_text(text).strip(" .;,:").casefold()
+    return norm_text(text).strip(" .;,:").casefold()
 
 
 def _ground(raw: RawFinding, index: _Index) -> tuple[_Cand | None, int, int]:
     """Вернуть кандидата (или None) и счётчики (проверено, подтверждено)."""
     ids = tuple(sorted({i for i in raw.requirement_ids if i in index.by_id}))
-    hits = [index.find(q, ids) for q in raw.quotes]
-    confirmed = sum(h is not None for h in hits)
-    if confirmed < len(hits):
-        return None, len(hits), confirmed
-    found = tuple(h for h in hits if h is not None)
+    per_quote = [index.find(q, ids) for q in raw.quotes]
+    confirmed = sum(bool(h) for h in per_quote)
+    if confirmed < len(per_quote):
+        return None, len(per_quote), confirmed
+    found = tuple(h for hits in per_quote for h in hits)
     if raw.defect_type is DefectType.CONTRADICTION and _has_overlap(found):
-        return None, len(hits), confirmed
+        return None, len(per_quote), confirmed
     if raw.scope is Scope.REQUIREMENT and not ids:
         ids = tuple(sorted({h.requirement_id for h in found if h.requirement_id}))
     cand = _Cand(raw, ids, found, _severity(raw, found, index), raw.suggestion)
-    return cand, len(hits), confirmed
+    return cand, len(per_quote), confirmed
 
 
 def _dedup_key(cand: _Cand) -> tuple:
@@ -263,6 +212,8 @@ def _prefer(a: _Cand, b: _Cand) -> _Cand:
         return (c.raw.source is FindingSource.RULE, _rank(c.severity), -len(c.raw.explanation))
 
     winner, loser = (a, b) if order(a) <= order(b) else (b, a)
+    top = min((winner.severity, loser.severity), key=_rank)
+    winner = replace(winner, severity=top)
     if winner.suggestion is None and loser.suggestion is not None:
         winner = replace(winner, suggestion=loser.suggestion)
     return winner
@@ -272,12 +223,8 @@ def _same_group(a: DefectType, b: DefectType) -> bool:
     return any(a in group and b in group for group in taxonomy.MERGEABLE_GROUPS)
 
 
-def _overlap(a: _Cand, b: _Cand) -> bool:
-    return any(
-        x.fragment_index == y.fragment_index and x.start < y.end and y.start < x.end
-        for x in a.hits
-        for y in b.hits
-    )
+def _hits_overlap(x: _Hit, y: _Hit) -> bool:
+    return x.fragment_index == y.fragment_index and x.start < y.end and y.start < x.end
 
 
 def _has_overlap(hits: tuple[_Hit, ...]) -> bool:
@@ -289,19 +236,49 @@ def _has_overlap(hits: tuple[_Hit, ...]) -> bool:
     )
 
 
+def _overlap_ratio(x: _Hit, y: _Hit) -> float:
+    """Доля перекрытия от длины более короткой из двух цитат."""
+    if x.fragment_index != y.fragment_index:
+        return 0.0
+    common = min(x.end, y.end) - max(x.start, y.start)
+    return max(common, 0) / min(x.end - x.start, y.end - y.start)
+
+
 def _mergeable(a: _Cand, b: _Cand) -> bool:
+    """Одна группа типов, общие id (или оба без id), цитаты перекрыты не меньше чем наполовину."""
+    ids_ok = (not a.ids and not b.ids) or bool(set(a.ids) & set(b.ids))
     return (
-        a.raw.scope is Scope.REQUIREMENT
-        and b.raw.scope is Scope.REQUIREMENT
-        and bool(a.ids)
-        and a.ids == b.ids
+        ids_ok
         and _same_group(a.raw.defect_type, b.raw.defect_type)
-        and _overlap(a, b)
+        and any(_overlap_ratio(x, y) >= MERGE_OVERLAP for x in a.hits for y in b.hits)
+    )
+
+
+def _combine(a: _Cand, b: _Cand) -> _Cand:
+    """Тип и серьёзность берём у самого серьёзного (потолок типа не превышается)."""
+    types = list(taxonomy.TAXONOMY)
+
+    def order(c: _Cand) -> tuple:
+        return (
+            _rank(c.severity),
+            -len(c.hits),
+            c.raw.source is FindingSource.RULE,
+            types.index(c.raw.defect_type),
+            -len(c.raw.explanation),
+        )
+
+    win, lose = (a, b) if order(a) <= order(b) else (b, a)
+    extra = tuple(h for h in lose.hits if not any(_hits_overlap(h, w) for w in win.hits))
+    return replace(
+        win,
+        ids=tuple(sorted({*win.ids, *lose.ids})),
+        hits=win.hits + tuple(dict.fromkeys(extra)),
+        suggestion=win.suggestion or lose.suggestion,
     )
 
 
 def _merge_overlapping(cands: list[_Cand]) -> list[_Cand]:
-    """Перекрывающиеся цитаты, один набор id, типы одной группы: берём более серьёзный."""
+    """Склейка по месту: перекрывающиеся цитаты, типы одной группы."""
     result = list(cands)
     changed = True
     while changed:
@@ -310,9 +287,7 @@ def _merge_overlapping(cands: list[_Cand]) -> list[_Cand]:
             j = next((k for k in range(i + 1, len(result)) if _mergeable(a, result[k])), None)
             if j is None:
                 continue
-            other = result.pop(j)
-            more_severe = a if _rank(a.severity) <= _rank(other.severity) else other
-            result[i] = _prefer(more_severe, other if more_severe is a else a)
+            result[i] = _combine(a, result.pop(j))
             changed = True
             break
     return result
