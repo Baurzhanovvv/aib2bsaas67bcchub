@@ -1,0 +1,42 @@
+[project]
+name = "reqcheck"
+dynamic = ["version"]
+description = "ИИ-агент статической проверки документа с требованиями"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "google-genai>=3.6.1",
+  "markdown-it-py>=4.3.0",
+  "pydantic>=2.9",
+  "pymupdf>=2.2",
+  "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+reqcheck = "reqcheck.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/reqcheck/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reqcheck"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "BLE"]
