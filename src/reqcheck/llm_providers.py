@@ -72,6 +72,24 @@ def _parse_delay(value: object) -> float | None:
         return None
 
 
+GEMINI_API_VERSION = "v1beta"
+"""JSON-режим (response_json_schema) есть только в v1beta; SDK по умолчанию ходит в v1 → 400."""
+
+
+def _gemini_http_options() -> Any:
+    """Явная версия API и без встроенных повторов SDK: повторы и фолбэк делает GeminiClient.
+
+    Иначе SDK сам повторяет 503 с паузами, и одна «попытка» клиента длится минуту.
+    """
+    from google.genai import types
+
+    return types.HttpOptions(
+        api_version=GEMINI_API_VERSION,
+        timeout=int(REQUEST_TIMEOUT_S * 1000),
+        retry_options=types.HttpRetryOptions(attempts=1),
+    )
+
+
 class GeminiProvider:
     name = "gemini"
 
@@ -80,7 +98,7 @@ class GeminiProvider:
 
         self.model = model
         self._key = api_key
-        self._client = genai.Client(api_key=api_key)
+        self._client = genai.Client(api_key=api_key, http_options=_gemini_http_options())
 
     def generate(self, *, system: str, user: str, schema: dict[str, Any]) -> ProviderReply:
         from google.genai import errors, types
@@ -90,7 +108,7 @@ class GeminiProvider:
             temperature=TEMPERATURE,
             response_mime_type="application/json",
             response_json_schema=schema,
-            http_options=types.HttpOptions(timeout=int(REQUEST_TIMEOUT_S * 1000)),
+            http_options=_gemini_http_options(),
         )
         try:
             resp = self._client.models.generate_content(
