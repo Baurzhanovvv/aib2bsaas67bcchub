@@ -81,6 +81,7 @@ def _passport(
         cache_hits=counters.cache_hits,
         tokens_in=counters.tokens_in,
         tokens_out=counters.tokens_out,
+        cost_usd=counters.cost_usd,
         quotes_checked=grounded.quotes_checked,
         quotes_confirmed=grounded.quotes_confirmed,
         findings_dropped=grounded.findings_dropped,

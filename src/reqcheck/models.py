@@ -321,6 +321,7 @@ class Passport(Contract):
     cache_hits: int = Field(default=0, ge=0)
     tokens_in: int = Field(default=0, ge=0)
     tokens_out: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0.0, ge=0)
     quotes_checked: int = Field(default=0, ge=0)
     quotes_confirmed: int = Field(default=0, ge=0)
     findings_dropped: int = Field(default=0, ge=0)

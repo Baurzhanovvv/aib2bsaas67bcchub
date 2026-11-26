@@ -105,7 +105,7 @@ def _passport(report: Report) -> list[str]:
         (
             "Запросы к модели",
             f"{p.llm_requests}, из кэша: {p.cache_hits}, токены: {p.tokens_in} вх. / "
-            f"{p.tokens_out} исх.",
+            f"{p.tokens_out} исх., стоимость ${p.cost_usd:.2f}",
         ),
         (
             "Цитаты",

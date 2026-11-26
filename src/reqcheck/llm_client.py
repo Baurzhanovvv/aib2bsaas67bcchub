@@ -5,6 +5,7 @@
 """
 
 import json
+import math
 import os
 import random
 import sys
@@ -22,6 +23,8 @@ from reqcheck.errors import ModelError
 from reqcheck.llm import LLMClient, LLMResult, LLMUsage
 from reqcheck.llm_cache import CacheEntry, DiskCache, make_cache_key
 from reqcheck.llm_providers import (
+    EFFORTS,
+    AnthropicProvider,
     GeminiProvider,
     OpenAICompatProvider,
     Provider,
@@ -39,6 +42,46 @@ BACKOFF_BUDGET_S = 30.0
 RETRY_AFTER_CAP_S = 20.0
 PROVIDER_BUDGET_S = 90.0
 STRIKES_TO_SKIP = 3
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
+DEFAULT_MAX_COST_USD = 2.0
+
+# Цены, USD за 1 млн токенов: (вход, выход, чтение из кэша). Запись в кэш — вход × 1.25.
+PRICES: dict[str, tuple[float, float, float]] = {
+    "claude-opus-5-5": (4.0, 20.0, 0.20),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.10),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),
+}
+CACHE_WRITE_FACTOR = 1.25
+
+
+_WARNED: set[str] = set()
+
+
+def _warn_once(text: str) -> None:
+    if text not in _WARNED:
+        _WARNED.add(text)
+        print(f"Предупреждение: {text}.", file=sys.stderr)
+
+
+def reply_cost_usd(reply: ProviderReply) -> float:
+    """Стоимость одного ответа; модель вне таблицы (Gemini free, фолбэк) считается бесплатной."""
+    price = next((v for k, v in PRICES.items() if reply.model.startswith(k)), None)
+    if price is None:
+        if not reply.model.startswith("claude"):
+            return 0.0
+        price = max(PRICES.values())  # неизвестная claude-модель — по самой дорогой
+        _warn_once(f"нет цены для модели {reply.model}, стоимость считается по самой дорогой")
+    p_in, p_out, p_read = price
+    fresh = max(0, reply.tokens_in - reply.cache_read_tokens - reply.cache_write_tokens)
+    total = (
+        fresh * p_in
+        + reply.cache_write_tokens * p_in * CACHE_WRITE_FACTOR
+        + reply.cache_read_tokens * p_read
+        + reply.tokens_out * p_out
+    )
+    return total / 1_000_000
+
+
 _MAX_ERROR_CHARS = 1500
 
 
@@ -54,7 +97,10 @@ class GeminiClient:
         sleep: Callable[[float], None] = time.sleep,
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
+        max_cost_usd: float | None = None,
     ) -> None:
+        self._max_cost = max_cost_usd
+        self._cost = 0.0
         self._primaries: list[Provider] = (
             list(primary) if isinstance(primary, Sequence) else [primary]
         )
@@ -78,14 +124,18 @@ class GeminiClient:
 
     def usage(self) -> LLMUsage:
         with self._lock:
-            usage = {**self._usage, "model": ",".join(self._models) or None}
+            usage = {
+                **self._usage,
+                "model": ",".join(self._models) or None,
+                "cost_usd": round(self._cost, 6),
+            }
             return LLMUsage(**usage)  # type: ignore[arg-type]
 
     def complete(self, *, system: str, user: str, response_model: type[T]) -> LLMResult[T]:
         schema = response_model.model_json_schema()
         key = make_cache_key(
             provider=self._primary.name,
-            model=",".join(p.model for p in self._primaries),
+            model=",".join(getattr(p, "cache_tag", p.model) for p in self._primaries),
             system=system,
             user=user,
             schema=json.dumps(schema, ensure_ascii=False, sort_keys=True),
@@ -182,12 +232,13 @@ class GeminiClient:
         slept = 0.0
         retries = TRANSIENT_RETRIES if last else 0
         for retry in range(retries + 1):
+            self._check_cost_limit()
             if self._clock() - started > PROVIDER_BUDGET_S:
                 raise ProviderError("превышено время ожидания ответа модели", retryable=False)
             try:
                 reply = provider.generate(system=system, user=user, schema=schema)
             except ProviderError as exc:
-                self._count_request()
+                self._count_request(exc.billed, note_model=False)
                 delay = self._backoff(exc, retry, slept)
                 if not exc.retryable or retry == retries or delay is None:
                     raise
@@ -206,17 +257,29 @@ class GeminiClient:
         remaining = BACKOFF_BUDGET_S - slept
         return min(delay, remaining) if remaining > 0 else None
 
+    def _check_cost_limit(self) -> None:
+        if self._max_cost is not None and self._cost >= self._max_cost:
+            raise ModelError(
+                f"Превышен лимит расходов на прогон ${self._max_cost:.2f} "
+                f"(израсходовано ${self._cost:.2f}). Повысьте REQCHECK_MAX_COST_USD "
+                "или смените модель."
+            )
+
     def _note_model(self, model: str) -> None:
         if model not in self._models:
             self._models.append(model)
 
-    def _count_request(self, reply: ProviderReply | None = None) -> None:
+    def _count_request(
+        self, reply: ProviderReply | None = None, *, note_model: bool = True
+    ) -> None:
         with self._lock:
             self._usage["requests"] += 1
             if reply is not None:
-                self._note_model(reply.model)
+                if note_model:
+                    self._note_model(reply.model)
                 self._usage["tokens_in"] += reply.tokens_in
                 self._usage["tokens_out"] += reply.tokens_out
+                self._cost += reply_cost_usd(reply)
 
     @staticmethod
     def _failure_text(reasons: list[str]) -> str:
@@ -233,21 +296,67 @@ def _short_validation(exc: ValidationError) -> str:
 
 
 def create_client_from_env() -> LLMClient | None:
-    """Клиент по переменным окружения и .env; нет GEMINI_API_KEY — None (режим без модели)."""
+    """Клиент по переменным окружения и .env; нет ключа выбранного провайдера — None."""
     load_dotenv(find_dotenv(usecwd=True), override=False)
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    provider = os.environ.get("REQCHECK_PROVIDER", "").strip().lower() or "gemini"
+    if provider not in ("gemini", "anthropic"):
+        raise ModelError("REQCHECK_PROVIDER должен быть gemini или anthropic.")
+    key_name = "GEMINI_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
+    api_key = os.environ.get(key_name, "").strip()
     if not api_key:
         return None
-    raw_models = os.environ.get("REQCHECK_MODEL", "").strip() or DEFAULT_MODELS
-    models = list(dict.fromkeys(m.strip() for m in raw_models.split(",") if m.strip()))
-    primary = [GeminiProvider(api_key, m) for m in models]
-    fallback = _fallback_from_env()
+    default = DEFAULT_MODELS if provider == "gemini" else DEFAULT_ANTHROPIC_MODEL
+    raw_models = os.environ.get("REQCHECK_MODEL", "").strip() or default
+    models = _models_for(provider, raw_models, default)
+    effort = os.environ.get("REQCHECK_EFFORT", "").strip().lower() or "medium"
+    if effort not in EFFORTS:
+        print(
+            f"Предупреждение: REQCHECK_EFFORT={effort!r} неизвестен, взято medium.", file=sys.stderr
+        )
+        effort = "medium"
+    primary: list[Provider] = [
+        GeminiProvider(api_key, m)
+        if provider == "gemini"
+        else AnthropicProvider(api_key, m, effort)
+        for m in models
+    ]
     cache = None
     if os.environ.get("REQCHECK_NO_CACHE", "").strip().lower() not in ("1", "true", "yes"):
         cache = DiskCache(
             Path(os.environ.get("REQCHECK_CACHE_DIR", "").strip() or DEFAULT_CACHE_DIR)
         )
-    return GeminiClient(primary, fallback=fallback, cache=cache)
+    return GeminiClient(
+        primary, fallback=_fallback_from_env(), cache=cache, max_cost_usd=_max_cost_from_env()
+    )
+
+
+def _models_for(provider: str, raw: str, default: str) -> list[str]:
+    """Список моделей из REQCHECK_MODEL; имена чужого провайдера отбрасываем с предупреждением."""
+    names = list(dict.fromkeys(m.strip() for m in raw.split(",") if m.strip()))
+    mine = [m for m in names if m.startswith("claude") == (provider == "anthropic")]
+    if len(mine) != len(names):
+        print(
+            f"Предупреждение: в REQCHECK_MODEL есть модели не провайдера {provider} — пропущены.",
+            file=sys.stderr,
+        )
+    return mine or [m.strip() for m in default.split(",")]
+
+
+def _max_cost_from_env() -> float:
+    raw = os.environ.get("REQCHECK_MAX_COST_USD", "").strip()
+    if not raw:
+        return DEFAULT_MAX_COST_USD
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not (math.isfinite(value) and value > 0):
+        print(
+            "Предупреждение: REQCHECK_MAX_COST_USD должен быть положительным числом, взято 2.0.",
+            file=sys.stderr,
+        )
+        return DEFAULT_MAX_COST_USD
+    return value
 
 
 def _fallback_from_env() -> Provider | None:

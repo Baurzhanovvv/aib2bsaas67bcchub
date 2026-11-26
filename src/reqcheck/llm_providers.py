@@ -24,6 +24,10 @@ class ProviderReply:
     model: str
     tokens_in: int = 0
     tokens_out: int = 0
+    cache_read_tokens: int = 0
+    """Входные токены, прочитанные из кэша промптов (входят в tokens_in)."""
+    cache_write_tokens: int = 0
+    """Входные токены, записанные в кэш промптов (входят в tokens_in)."""
 
 
 class ProviderError(Exception):
@@ -36,6 +40,7 @@ class ProviderError(Exception):
         retryable: bool,
         retry_after: float | None = None,
         exhausted: bool = False,
+        billed: "ProviderReply | None" = None,
     ) -> None:
         super().__init__(reason)
         self.reason = reason
@@ -43,6 +48,8 @@ class ProviderError(Exception):
         self.retry_after = retry_after
         self.exhausted = exhausted
         """Дневная квота модели исчерпана: в этом прогоне её больше не пробуем."""
+        self.billed = billed
+        """Ответ, за который взяли деньги, хотя результата нет (refusal, обрезка)."""
 
 
 class Provider(Protocol):
@@ -73,7 +80,8 @@ def _classify_status(
         return ProviderError(
             f"сервис модели временно недоступен ({code})", retryable=True, retry_after=retry_after
         )
-    return ProviderError(f"запрос отклонён сервисом модели ({code})", retryable=False)
+    detail = f": {message[:200]}" if message else ""
+    return ProviderError(f"запрос отклонён сервисом модели ({code}){detail}", retryable=False)
 
 
 def _parse_delay(value: object) -> float | None:
@@ -293,3 +301,90 @@ def _safe_count(usage: object, field: str) -> int:
         return 0
     value = usage.get(field)
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+# --- Anthropic ---------------------------------------------------------------------
+
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+ANTHROPIC_MAX_TOKENS = 16000
+
+
+def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """simplify_schema + additionalProperties: false у каждого объекта (требование json_schema)."""
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        out = {k: (v if k == "properties" else walk(v)) for k, v in node.items()}
+        if isinstance(out.get("properties"), dict):
+            out["properties"] = {n: walk(sub) for n, sub in out["properties"].items()}
+            out["additionalProperties"] = False
+        return out
+
+    return walk(simplify_schema(schema))  # type: ignore[no-any-return]
+
+
+class AnthropicProvider:
+    name = "anthropic"
+
+    def __init__(self, api_key: str, model: str, effort: str = "medium") -> None:
+        import anthropic
+
+        self.model = model
+        self._key = api_key
+        self._effort = effort if effort in EFFORTS else "medium"
+        self.cache_tag = f"{model}|effort={self._effort}|max_tokens={ANTHROPIC_MAX_TOKENS}"
+        """Всё, что влияет на ответ помимо промпта, — идёт в ключ кэша."""
+        self._client = anthropic.Anthropic(
+            api_key=api_key, timeout=REQUEST_TIMEOUT_S * 2, max_retries=0
+        )
+
+    def generate(self, *, system: str, user: str, schema: dict[str, Any]) -> ProviderReply:
+        import anthropic
+
+        try:
+            resp = self._client.messages.create(
+                model=self.model,
+                max_tokens=ANTHROPIC_MAX_TOKENS,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+                cache_control={"type": "ephemeral"},
+                output_config={
+                    "effort": self._effort,
+                    "format": {"type": "json_schema", "schema": strict_schema(schema)},
+                },
+            )
+        except anthropic.APIStatusError as exc:
+            headers = getattr(exc.response, "headers", None)
+            delay = _parse_delay(headers.get("retry-after")) if headers is not None else None
+            raise _classify_status(
+                exc.status_code, _redact(str(exc.message or ""), self._key), delay
+            ) from None
+        except Exception:  # noqa: BLE001 — сеть/таймаут; текст SDK не показываем
+            raise ProviderError("нет связи с сервисом модели (сеть)", retryable=True) from None
+        return self._reply(resp)
+
+    def _reply(self, resp: Any) -> ProviderReply:
+        text = next((b.text for b in resp.content if getattr(b, "type", "") == "text"), "")
+        u = resp.usage
+        read = getattr(u, "cache_read_input_tokens", 0) or 0
+        write = getattr(u, "cache_creation_input_tokens", 0) or 0
+        reply = ProviderReply(
+            text=text,
+            model=resp.model or self.model,
+            tokens_in=(u.input_tokens or 0) + read + write,
+            tokens_out=u.output_tokens or 0,
+            cache_read_tokens=read,
+            cache_write_tokens=write,
+        )
+        if resp.stop_reason == "refusal":
+            raise ProviderError(
+                "модель отказалась отвечать (refusal)", retryable=False, billed=reply
+            )
+        if resp.stop_reason == "max_tokens":
+            raise ProviderError(
+                "ответ модели обрезан по лимиту токенов", retryable=False, billed=reply
+            )
+        return reply

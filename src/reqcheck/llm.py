@@ -36,6 +36,8 @@ class LLMUsage(Contract):
     cache_hits: int = Field(default=0, ge=0)
     tokens_in: int = Field(default=0, ge=0)
     tokens_out: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0.0, ge=0)
+    """Расчётная стоимость запросов прогона в долларах; 0 для бесплатных моделей."""
 
 
 class LLMClient(Protocol):

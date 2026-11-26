@@ -5,6 +5,7 @@ description = "ИИ-агент статической проверки доку�
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "anthropic>=2.14.0",
   "google-genai>=3.6.1",
   "markdown-it-py>=4.3.0",
   "pydantic>=2.9",
