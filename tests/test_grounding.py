@@ -331,6 +331,7 @@ def test_cross_scope_merge_keeps_more_quotes_and_max_severity() -> None:
         ("«оперативно»  выдавать",),
         defect=DefectType.INCONSISTENT_TERMS,
         impact=Impact.HIGH,
+        explanation="Термин назван по-разному. Подробности.",
     )
     wide = raw(
         pair,
@@ -346,6 +347,8 @@ def test_cross_scope_merge_keeps_more_quotes_and_max_severity() -> None:
     assert f.scope is Scope.REQUIREMENT_SET
     assert f.severity is Severity.MAJOR
     assert len(f.quotes) == 2
+    # Суть второго замечания (другого типа) дописана, а не выброшена.
+    assert f.explanation == "Пояснение. Термин назван по-разному."
 
 
 def test_cross_group_types_not_merged() -> None:

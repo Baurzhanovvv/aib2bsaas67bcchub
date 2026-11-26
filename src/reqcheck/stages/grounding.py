@@ -312,6 +312,10 @@ def _combine(a: _Cand, b: _Cand) -> _Cand:
             update={"defect_type": win.raw.defect_type, "explanation": text}
         )
         win, lose = replace(model, raw=kept, severity=win.severity), rule
+    elif win.raw.defect_type is not lose.raw.defect_type:
+        # Два замечания разного типа на одном месте — два дефекта: суть второго не теряем.
+        text = with_rule_fact(win.raw.explanation, lose.raw.explanation)
+        win = replace(win, raw=win.raw.model_copy(update={"explanation": text}))
     extra = tuple(h for h in lose.hits if not any(_hits_overlap(h, w) for w in win.hits))
     return replace(
         win,
