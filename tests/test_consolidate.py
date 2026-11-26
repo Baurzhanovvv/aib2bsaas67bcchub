@@ -143,11 +143,11 @@ def test_findings_are_wrapped_as_data() -> None:
     assert "<<<DOC-" in system and user.startswith("<<<DOC-")
 
 
-def test_explanation_notes_merged_count() -> None:
+def test_explanation_keeps_both_types_without_service_notes() -> None:
     a = finding(1, 5)
     b = finding(2, 9, DefectType.UNVERIFIABLE, Severity.CRITICAL)
     merged = run(grounded(a, b), FakeLLM(groups(("D-001", "D-002")))).findings[0]
-    assert merged.explanation == "Пояснение 2. (объединено замечаний: 2)"
+    assert merged.explanation == "Пояснение 2. Пояснение 1."
 
 
 def test_oversized_group_skipped() -> None:
@@ -196,14 +196,51 @@ def test_overlapping_quote_lines_in_one_section_allowed() -> None:
     assert consolidate(section_doc(("A",), ("A",), ("B",)), (), other, llm) is other
 
 
-def test_rule_findings_excluded() -> None:
-    rule = finding(1, 5, source=FindingSource.RULE)
-    model = finding(2, 5)
+def test_rule_merged_into_model_finding() -> None:
+    """Правило и модель об одном: текст модели, серьёзность — самая высокая в группе."""
+    rule = finding(1, 5, source=FindingSource.RULE, severity=Severity.CRITICAL)
+    model = finding(2, 5, severity=Severity.MAJOR)
+    result = run(grounded(rule, model), FakeLLM(groups(("D-001", "D-002"))))
+    assert len(result.findings) == 1
+    merged = result.findings[0]
+    assert merged.source is FindingSource.MODEL and merged.rule_id is None
+    assert merged.explanation.startswith("Пояснение 2.")
+    assert merged.severity is Severity.CRITICAL
+
+
+def test_two_rule_findings_never_merged() -> None:
+    first = finding(1, 5, source=FindingSource.RULE)
+    second = finding(2, 5, source=FindingSource.RULE)
+    model = finding(3, 9, reqs=("R-002",))
+    g = grounded(first, second, model)
+    assert run(g, FakeLLM(groups(("D-001", "D-002")))) is g
+    only_rules = grounded(first, second)
     llm = FakeLLM(groups(("D-001", "D-002")))
-    g = grounded(rule, model)
-    assert run(g, llm) is g
-    assert "D-001" not in llm.calls[0][1] if llm.calls else True
-    other = finding(3, 6)
-    result = run(grounded(rule, model, other), FakeLLM(groups(("D-001", "D-002"))))
-    assert any(f.source is FindingSource.RULE for f in result.findings)
-    assert len(result.findings) == 3
+    assert run(only_rules, llm) is only_rules
+    assert not llm.calls
+
+
+def test_shared_line_links_findings_across_sections() -> None:
+    """Одна и та же строка процитирована в двух замечаниях без общего требования."""
+    wide = finding(1, 29, reqs=())
+    extra = tuple(
+        Quote(text=f"цитата номер {n}", location=Location(line_start=n, line_end=n))
+        for n in (52, 65)
+    )
+    wide = wide.model_copy(update={"quotes": wide.quotes + extra})
+    narrow = finding(2, 52, reqs=("R-005",))
+    result = run(grounded(wide, narrow), FakeLLM(groups(("D-001", "D-002"))))
+    assert len(result.findings) == 1
+    assert len(result.findings[0].quotes) == 3
+
+
+def test_merged_findings_of_other_type_keep_their_gist() -> None:
+    """Склеены два замечания модели разного типа: суть второго дописывается, а не теряется."""
+    first = finding(1, 5, severity=Severity.CRITICAL)
+    second = finding(2, 5, severity=Severity.MAJOR).model_copy(
+        update={"defect_type": DefectType.INTERFACE_MISUSE}
+    )
+    assert first.defect_type is not second.defect_type
+    result = run(grounded(first, second), FakeLLM(groups(("D-001", "D-002"))))
+    assert len(result.findings) == 1
+    assert result.findings[0].explanation == "Пояснение 1. Пояснение 2."

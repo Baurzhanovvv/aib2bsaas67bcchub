@@ -65,6 +65,7 @@ def _passport(
     usage: LLMUsage | None,
     duration_s: float,
     model_error: str | None,
+    profile: str | None = None,
 ) -> Passport:
     version, dirty = agent_version()
     counters = usage if usage is not None else LLMUsage()
@@ -82,6 +83,8 @@ def _passport(
         tokens_in=counters.tokens_in,
         tokens_out=counters.tokens_out,
         cost_usd=counters.cost_usd,
+        invalid_items=counters.invalid_items,
+        profile=profile,
         quotes_checked=grounded.quotes_checked,
         quotes_confirmed=grounded.quotes_confirmed,
         findings_dropped=grounded.findings_dropped,
@@ -98,6 +101,7 @@ def build_report(
     usage: LLMUsage | None,
     duration_s: float,
     model_error: str | None = None,
+    profile: str | None = None,
 ) -> Report:
     """Собрать Report. Итог GO / CONDITIONAL GO / NO-GO считает код, не модель.
 
@@ -109,7 +113,7 @@ def build_report(
     findings = grounded.findings
     complete = usage is not None and model_error is None and not document.unread_pages
     return Report(
-        passport=_passport(document, grounded, usage, duration_s, model_error),
+        passport=_passport(document, grounded, usage, duration_s, model_error, profile),
         requirements=requirements,
         findings=findings,
         trace=trace,

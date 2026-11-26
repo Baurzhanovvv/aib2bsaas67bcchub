@@ -87,7 +87,8 @@ def _passport(report: Report) -> list[str]:
         (
             "Запросы к модели",
             f"{p.llm_requests}, из кэша: {p.cache_hits}, токены: {p.tokens_in} вх. / "
-            f"{p.tokens_out} исх., стоимость ${p.cost_usd:.2f}",
+            f"{p.tokens_out} исх., стоимость ${p.cost_usd:.2f}"
+            + (f"; отброшено элементов не по схеме: {p.invalid_items}" if p.invalid_items else ""),
         ),
         (
             "Цитаты",
@@ -96,6 +97,8 @@ def _passport(report: Report) -> list[str]:
         ),
         ("Время прогона", f"{p.duration_s:.1f} с"),
     ]
+    if p.profile:
+        rows.append(("Профиль домена", p.profile))
     if p.model_error:
         rows.append(("Проверка моделью прервана", p.model_error))
     if p.unread_pages:
@@ -248,13 +251,23 @@ def _summary(report: Report) -> list[str]:
     return [*out, "", *coverage_table(report)]
 
 
+def _incomplete(report: Report) -> bool:
+    """Документ проверен не целиком: модель не отработала или есть непрочитанные страницы."""
+    p = report.passport
+    return p.mode is RunMode.RULES_ONLY or bool(p.unread_pages)
+
+
 def _verdict_text(report: Report) -> str:
     if report.verdict is Verdict.NO_GO:
         return "Начинать разработку нельзя: есть блокирующие дефекты."
-    if report.verdict is Verdict.CONDITIONAL_GO:
+    if _incomplete(report):
+        # О том, чего не проверяли, «можно» не говорим — даже с оговоркой.
+        text = "Итог не определён: проверка неполная, начинать разработку по этому отчёту нельзя."
         if report.summary.critical_finding_ids:
-            return "Можно начинать с условием: сначала исправить критичные дефекты."
-        return "Можно начинать с условием: проверка неполная, см. ограничения ниже."
+            text += " Найденные критичные дефекты — ниже."
+        return text
+    if report.verdict is Verdict.CONDITIONAL_GO:
+        return "Можно начинать с условием: сначала исправить критичные дефекты."
     return "Можно начинать."
 
 
@@ -265,7 +278,7 @@ def _verdict(report: Report) -> list[str]:
     if p.model_error:
         out += [f"Ограничение: проверка моделью прервана ({p.model_error}); {_INCOMPLETE}", ""]
     elif p.mode is RunMode.RULES_ONLY:
-        out += ["Ограничение: прогон без модели, итог не выше «можно начинать с условием».", ""]
+        out += [f"Ограничение: прогон без модели; {_INCOMPLETE}", ""]
     if p.unread_pages:
         out += [f"Ограничение: не прочитаны страницы {_pages(p.unread_pages)}.", ""]
     crit = [by_id[i] for i in report.summary.critical_finding_ids]

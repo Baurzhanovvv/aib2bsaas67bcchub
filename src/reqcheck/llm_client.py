@@ -120,6 +120,7 @@ class GeminiClient:
             "cache_hits": 0,
             "tokens_in": 0,
             "tokens_out": 0,
+            "invalid_items": 0,
         }
 
     def usage(self) -> LLMUsage:
@@ -175,10 +176,11 @@ class GeminiClient:
         if entry is None:
             return None
         try:
-            data = response_model.model_validate_json(entry.text)
+            data, dropped = validate_lenient(response_model, entry.text)
         except ValidationError:
             return None
         with self._lock:
+            self._usage["invalid_items"] += dropped
             self._usage["cache_hits"] += 1
             self._note_model(entry.model)
         return LLMResult(data=data, model=entry.model, cached=True)
@@ -201,7 +203,7 @@ class GeminiClient:
         for attempt in (1, 2):
             reply = self._call_with_retries(provider, system, prompt, schema, started, last)
             try:
-                data = response_model.model_validate_json(reply.text)
+                data, dropped = validate_lenient(response_model, reply.text)
             except ValidationError as exc:
                 if attempt == 2:
                     raise ProviderError(
@@ -213,6 +215,8 @@ class GeminiClient:
                     f"{_short_validation(exc)}\nВерни исправленный JSON строго по схеме."
                 )
                 continue
+            with self._lock:
+                self._usage["invalid_items"] += dropped
             result = LLMResult(
                 data=data, model=reply.model, tokens_in=reply.tokens_in, tokens_out=reply.tokens_out
             )
@@ -289,6 +293,35 @@ class GeminiClient:
             "Проверьте ключ GEMINI_API_KEY, квоту и сеть либо настройте резервный провайдер "
             "(REQCHECK_FALLBACK_BASE_URL, REQCHECK_FALLBACK_API_KEY, REQCHECK_FALLBACK_MODEL)."
         )
+
+
+def validate_lenient(response_model: type[T], text: str) -> tuple[T, int]:
+    """Разобрать ответ; битые элементы списков отбросить, если целых не меньше.
+
+    Одно замечание с выдуманным типом не должно стоить всего ответа: слабые модели
+    ошибаются в одном поле. Сломан конверт или большинство элементов — ValidationError,
+    и вызывающий переспрашивает модель. Возвращает данные и число отброшенных элементов.
+    """
+    try:
+        return response_model.model_validate_json(text), 0
+    except ValidationError as exc:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            raise exc from None
+        bad: dict[str, set[int]] = {}
+        for error in exc.errors():
+            loc = error["loc"]
+            in_list = len(loc) >= 2 and isinstance(loc[1], int) and isinstance(data, dict)
+            if not in_list or not isinstance(data.get(loc[0]), list):
+                raise
+            bad.setdefault(str(loc[0]), set()).add(loc[1])
+        dropped = sum(len(indexes) for indexes in bad.values())
+        if dropped > sum(len(data[field]) for field in bad) - dropped:
+            raise
+        for field, indexes in bad.items():
+            data[field] = [item for i, item in enumerate(data[field]) if i not in indexes]
+        return response_model.model_validate(data), dropped
 
 
 def _short_validation(exc: ValidationError) -> str:

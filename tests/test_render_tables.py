@@ -91,8 +91,8 @@ def test_customer_questions_listed_before_fix_first() -> None:
     f3 = fnd("D-003", suggestion="Задать порог.")
     text = render_markdown(report([req("R-001")], [f1, f2, f3], fix_first=("D-001",)))
     assert "### Вопросы заказчику" in text
-    assert "1. кто утверждает? (D-001; R-001)" in text
-    assert "2. какой срок хранения? (D-002; R-001)" in text
+    assert "1. Кто утверждает? (D-001; R-001)" in text
+    assert "2. Какой срок хранения? (D-002; R-001)" in text
     assert "Задать порог" not in text.split("### Вопросы заказчику")[1].split("Исправить")[0]
     assert text.index("### Вопросы заказчику") < text.index("Исправить в первую очередь")
 

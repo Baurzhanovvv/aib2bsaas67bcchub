@@ -7,6 +7,7 @@ from pathlib import Path
 
 from reqcheck.errors import InputError
 from reqcheck.models import Document, DocumentFormat
+from reqcheck.stages.reader_docx import docx_to_markdown
 from reqcheck.stages.reader_md import parse_markdown
 from reqcheck.stages.reader_pdf import parse_pdf
 
@@ -57,7 +58,14 @@ def decode_text(data: bytes, name: str) -> str:
 
 def _check_signature(data: bytes, suffix: str, name: str) -> None:
     detected = _detect(data)
-    if suffix == ".pdf":
+    if suffix == ".docx":
+        if not data.startswith(b"PK\x03\x04"):
+            what = detected or "не DOCX"
+            raise InputError(
+                f"Файл «{name}» имеет расширение .docx, но по содержимому это {what}. "
+                "Передайте настоящий DOCX, PDF или Markdown."
+            )
+    elif suffix == ".pdf":
         if b"%PDF-" not in data[:_PDF_HEAD_WINDOW]:
             what = detected or "не PDF"
             raise InputError(
@@ -72,16 +80,11 @@ def _check_signature(data: bytes, suffix: str, name: str) -> None:
 
 
 def _check_extension(suffix: str, name: str) -> None:
-    if suffix == ".docx":
-        raise InputError(
-            f"Формат DOCX («{name}») пока не поддерживается, поддержка появится позже. "
-            "Сохраните документ как PDF или Markdown."
-        )
-    if suffix not in _MD_EXTENSIONS and suffix != ".pdf":
+    if suffix not in _MD_EXTENSIONS and suffix not in (".pdf", ".docx"):
         shown = suffix or "без расширения"
         raise InputError(
             f"Неподдерживаемый формат файла «{name}» ({shown}). "
-            "Поддерживаются PDF и Markdown (.md)."
+            "Поддерживаются PDF, DOCX и Markdown (.md)."
         )
 
 
@@ -109,8 +112,10 @@ def read_document(path: Path) -> Document:
         fragments, unread = parse_pdf(data, next_id)
         fmt = DocumentFormat.PDF
     else:
-        fragments, unread = parse_markdown(decode_text(data, name), next_id), ()
-        fmt = DocumentFormat.MARKDOWN
+        is_docx = suffix == ".docx"
+        text = docx_to_markdown(data, name) if is_docx else decode_text(data, name)
+        fragments, unread = parse_markdown(text, next_id), ()
+        fmt = DocumentFormat.DOCX if is_docx else DocumentFormat.MARKDOWN
         if not fragments:
             raise InputError(f"В файле «{name}» нет текста для проверки.")
     return Document(

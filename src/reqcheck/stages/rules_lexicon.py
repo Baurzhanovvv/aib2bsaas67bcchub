@@ -88,3 +88,97 @@ ERROR_MARKER = _rx(
     r"(?<!без\s)\b(?:errors?|ошибк\w*|fail(?:s|ed|ure)?|неуспе\w*)\b"
     r"|\bstatus\W{0,3}ERROR\b|\"result\"\s*:\s*\"ERROR\""
 )
+
+# --- Контракт API между фрагментами (rules_api) -------------------------------
+
+# Объявление метода: «REST type | GET», «Метод: `GET`», «HTTP method — HEAD».
+API_METHOD_DECL = re.compile(r"(?i:REST\s*type|HTTP[- ]?method|метод|method)\W{0,12}(GET|HEAD)\b")
+# Назначение операции начинается со слова-действия: «Description | Сохранение …».
+API_PURPOSE_MUTATION = _rx(
+    r"^\W*(?:description|описание|назначение|purpose|summary)\W+"
+    rf"({MUTATION_RU.pattern}|{MUTATION_EN.pattern})"
+)
+# Действие в имени операции внутри пути: /items/saveLimit, /orders/delete-all.
+API_PATH_MUTATION = re.compile(
+    r"/[\w\-/{}]*?(?<![A-Za-z])((?:save|create|update|delete|set|remove)(?=[A-Z_/\-])\w*)"
+)
+NEGATION_BEFORE = _rx(r"\b(?:не|not)\s+$")
+
+# Контекст HTTP без общих слов («ответ», «код», «метод» встречаются в любом ТЗ).
+HTTP_STRICT = _rx(r"\b(?:HTTP|REST|API|status|статус\w*|response)\b")
+SUCCESS_STATUS_HEAD = re.compile(r"^\W*2\d\d\b")
+SUCCESS_STATUS = re.compile(r"(?<![\d.,/-])2\d\d(?![\d.,]*\d)")
+ERROR_BODY = _rx(r"\"(?:result|status|state|outcome)\"\s*:\s*\"(?:error|fail(?:ed|ure)?)\"")
+
+_KNOWN_STATUS = (
+    "200|201|202|204|301|302|304|400|401|403|404|405|409|410|412|415|422|429|500|502|503|504"
+)
+# После числа стоит единица или счётное слово — это количество, а не код ответа.
+_NOT_A_STATUS = (
+    r"₸|тг|тенге|руб|\$|€|%|kzt|usd|eur|шт|мс|ms|сек|мин|час|дн|раз|строк|запис|симв|знак"
+    r"|байт|бит|bit|px|rps|кб|мб|гб|kb|mb|gb|кг|км|позиц|пользовател|клиент|заказ|документ"
+    r"|элемент|объект|запрос|попыт|items?|users?|records?|rows?|chars?|bytes?|requests?"
+)
+_STATUS = rf"({_KNOWN_STATUS})(?![\d.,]*\d)(?![\s ]*(?:\d{{3}}\b|{_NOT_A_STATUS}))"
+
+# Стандартные фразы кодов ответа (RFC 9110). «OK» не берём: слово слишком общее.
+REASON_PHRASES: dict[str, int] = {
+    "created": 201,
+    "accepted": 202,
+    "no content": 204,
+    "bad request": 400,
+    "unauthorized": 401,
+    "forbidden": 403,
+    "not found": 404,
+    "conflict": 409,
+    "internal server error": 500,
+}
+# Фраза стоит сразу за кодом; между ними — знаки и не больше одного слова с тире:
+# «204 — Not Found», «200. Successful — Created», «`201` | **Created**».
+STATUS_WITH_PHRASE = _rx(
+    rf"(?<![\d.,/:-])(?<!\d[\s ]){_STATUS}[\s.|:*_`—–-]{{0,8}}"
+    r"(?:[A-Za-zА-Яа-яЁё]+[\s*_`]*[—–-][\s*_`]*)?\b(" + "|".join(REASON_PHRASES) + r")\b"
+)
+
+# Перечень статусов: код в начале строки с описанием, столбец кодов, ключи спецификации.
+STATUS_LIST_HEAD = re.compile(r"^[\s|*_`#>-]*([1-5]\d\d)[*_`]*\s*(?:[.:—–-]|\|)[*_`]*\s*\S")
+STATUS_COLUMN = _rx(r"http|status|статус|код|код ответа|код состояния|status code|http status")
+STATUS_CELL = re.compile(r"[1-5]\d\d")
+STATUS_SPEC_KEY = re.compile(r"^\s*['\"]?([1-5]\d\d)['\"]?\s*:", re.MULTILINE)
+STATUS_HTTP_LINE = re.compile(r"HTTP/\d(?:\.\d)?\s+([1-5]\d\d)\b")
+# Упоминание кода в тексте: слово-указатель прямо перед числом, дальше — перечисление.
+STATUS_MENTION = _rx(
+    r"\b(?:код\w*|статус\w*|status|HTTP|результат\w*|возвраща\w*|верн\w*|отвеча\w*"
+    r"|returns?|responds?)\s+(?:(?:код\w*|статус\w*|status|HTTP)\s+)?" + _STATUS
+)
+STATUS_NEXT = _rx(r"\s*(?:,|или|и|or|and|/)\s*" + _STATUS)
+
+# Таблицы параметров: столбец имени и столбец типа; пара «запрос — ответ» одного метода.
+TABLE_SEPARATOR = re.compile(r"^\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?$")
+CELL_SPLIT = re.compile(r"(?<!\\)\|")
+NAME_COLUMN = _rx(r"parameter|param|параметр|поле|field|name|имя|атрибут|attribute")
+TYPE_COLUMN = _rx(r"format|формат|тип|type|тип данных|data type")
+TYPE_WORD = _rx(r"[a-zа-яё]+")
+TYPE_SYNONYMS: dict[str, str] = {
+    "int": "integer",
+    "long": "integer",
+    "целое": "integer",
+    "bool": "boolean",
+    "булево": "boolean",
+    "str": "string",
+    "строка": "string",
+    "text": "string",
+    "число": "number",
+    "float": "number",
+    "double": "number",
+    "decimal": "number",
+}
+REQUEST_PART = _rx(r"запрос|request|query|body|парамет|входн")
+RESPONSE_PART = _rx(r"ответ|response|результат|выходн")
+
+# Машиночитаемая спецификация и пути, объявленные в тексте.
+SPEC_MARK = _rx(r"^\s*(?:openapi|swagger)\s*:", _I | re.MULTILINE)
+SPEC_PATHS_LINE = _rx(r"^paths\s*:", _I | re.MULTILINE)
+SPEC_PATH_KEY = re.compile(r"^\s*(/[\w\-./{}]*)\s*:", re.MULTILINE)
+PATH_DECL = _rx(r"(?:путь|path|endpoint|эндпоинт)\W{0,12}(/[\w\-./{}]+)")
+PATH_PARAM = re.compile(r"\{[^}]*\}")

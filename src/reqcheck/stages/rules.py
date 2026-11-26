@@ -14,6 +14,7 @@ from reqcheck.models import (
     Requirement,
     Scope,
 )
+from reqcheck.stages import rules_api
 from reqcheck.stages import rules_lexicon as lex
 
 _EDGE_MARKUP = " \t*_`|"
@@ -324,4 +325,5 @@ def apply_rules(document: Document, requirements: tuple[Requirement, ...]) -> li
         findings.append(rule_http_error_200(req))
         if prefixes:
             findings.append(rule_undefined_ref(req, ids, prefixes))
+    findings += rules_api.apply_api_rules(document, requirements)
     return [f for f in findings if f is not None]

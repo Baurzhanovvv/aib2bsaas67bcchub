@@ -2,8 +2,11 @@
 
 Одна находка приходит из нескольких проходов с разными цитатами и одним и тем же
 вопросом заказчику. Склейка по позициям цитат (grounding) их не видит. Модель только
-называет группы id, склейку делает код: тип и серьёзность у самого серьёзного замечания,
-цитаты и id требований — объединение, идентификаторы D-001… назначаются заново.
+называет группы id, склейку делает код: цитаты и id требований — объединение, серьёзность —
+самая высокая в группе, идентификаторы D-001… назначаются заново.
+
+Замечание правила склеивается с замечанием модели о том же: текст и вопрос заказчику берутся
+у модели, серьёзность правила не теряется. Два замечания правил между собой не склеиваются.
 """
 
 from reqcheck import taxonomy
@@ -14,10 +17,10 @@ from reqcheck.models import (
     Finding,
     FindingSource,
     GroundingResult,
-    Quote,
     Requirement,
 )
 from reqcheck.stages.checks import markers, run_token, wrap
+from reqcheck.stages.grounding import with_rule_fact
 
 PROMPT_VERSION = "2026-11-27.1"
 MIN_FINDINGS = 2
@@ -76,52 +79,67 @@ def _requirement_set(finding: Finding) -> set[str]:
     return ids | {q.requirement_id for q in finding.quotes if q.requirement_id}
 
 
-def _section(document: Document, quote: Quote) -> tuple[str, ...] | None:
-    loc = quote.location
-    for fragment in document.fragments:
-        frag = fragment.location
-        same_page = loc.page is None or frag.page is None or loc.page == frag.page
-        if same_page and frag.line_start <= loc.line_start <= frag.line_end:
-            return fragment.section
-    return None
+def _touch(a: Finding, b: Finding) -> bool:
+    """Есть пара цитат на пересекающихся строках одной страницы."""
+    return any(
+        x.location.page == y.location.page
+        and x.location.line_start <= y.location.line_end
+        and y.location.line_start <= x.location.line_end
+        for x in a.quotes
+        for y in b.quotes
+    )
 
 
-def _lines_connected(group: list[Finding], document: Document) -> bool:
-    """Цитаты всех замечаний связаны перекрытием строк и лежат в одном разделе."""
-    quotes = [(i, q) for i, f in enumerate(group) for q in f.quotes]
-    sections = {_section(document, q) for _, q in quotes}
-    if len(sections) != 1 or None in sections:
-        return False
+def _covered(rule: Finding, models: list[Finding]) -> bool:
+    """Каждая цитата правила лежит на строках, которые процитировало замечание модели.
+
+    Иначе после склейки цитаты правила остались бы в отчёте без объяснения."""
+    return all(
+        any(_touch(rule.model_copy(update={"quotes": (quote,)}), other) for other in models)
+        for quote in rule.quotes
+    )
+
+
+def _fits(rule: Finding, models: list[Finding]) -> bool:
+    """Правило вливается в замечание модели того же типа либо в процитировавшее его места."""
+    same = [m for m in models if m.defect_type is rule.defect_type and _touch(rule, m)]
+    return bool(same) or _covered(rule, models)
+
+
+def _lines_connected(group: list[Finding]) -> bool:
+    """Замечания связаны цепочкой общих строк: у каждого есть цитата там же, где у соседа."""
     linked, changed = {0}, True
     while changed:
         changed = False
-        for i, a in quotes:
-            for j, b in quotes:
-                near = a.location.line_start <= b.location.line_end
-                near = near and b.location.line_start <= a.location.line_end
-                if i in linked and j not in linked and near:
+        for i in tuple(linked):
+            for j, other in enumerate(group):
+                if j not in linked and _touch(group[i], other):
                     linked.add(j)
                     changed = True
     return len(linked) == len(group)
 
 
-def _coherent(group: list[Finding], document: Document) -> bool:
-    """Общее требование у всех замечаний группы либо пересечение цитат в одном разделе."""
+def _coherent(group: list[Finding]) -> bool:
+    """Общее требование у всех замечаний группы либо цитаты на общих строках.
+
+    Группа только из замечаний правил не склеивается: правила различны по построению."""
+    if all(f.source is FindingSource.RULE for f in group):
+        return False
     common = set.intersection(*(_requirement_set(f) for f in group))
-    return bool(common) or _lines_connected(group, document)
+    return bool(common) or _lines_connected(group)
 
 
-def _valid_groups(
-    groups: tuple[GroupDraft, ...], by_id: dict[str, Finding], document: Document
-) -> list[list[str]]:
+def _valid_groups(groups: tuple[GroupDraft, ...], by_id: dict[str, Finding]) -> list[list[str]]:
     """Неизвестные и занятые id отбрасываются; слишком большие и несвязные группы пропускаются."""
     used: set[str] = set()
     result: list[list[str]] = []
     for group in groups:
         ids = [i for i in dict.fromkeys(group.ids) if i in by_id and i not in used]
+        models = [by_id[i] for i in ids if by_id[i].source is not FindingSource.RULE]
+        ids = [i for i in ids if by_id[i] in models or _fits(by_id[i], models)]
         if not MIN_FINDINGS <= len(ids) <= MAX_GROUP:
             continue
-        if _coherent([by_id[i] for i in ids], document):
+        if _coherent([by_id[i] for i in ids]):
             used.update(ids)
             result.append(ids)
     return result
@@ -144,14 +162,25 @@ def _merge(group: list[Finding]) -> Finding:
         )
 
     ranked = sorted(group, key=order)
-    win = ranked[0]
-    quotes = {(q.text, q.location): q for f in ranked for q in f.quotes}
+    win = next((f for f in ranked if f.source is not FindingSource.RULE), ranked[0])
+    quotes = {(q.text, q.location): q for f in (win, *ranked) for q in f.quotes}
+    text = win.explanation
+    for other in ranked:
+        # Замечание другого типа — другой дефект на том же месте: его суть не теряем.
+        if other is not win and other.defect_type is not win.defect_type:
+            text = with_rule_fact(text, other.explanation)
     return win.model_copy(
         update={
+            # Тип задаёт потолок серьёзности, поэтому берутся вместе у самого серьёзного.
+            "severity": ranked[0].severity,
+            "defect_type": ranked[0].defect_type,
+            "criterion": ranked[0].criterion,
+            "finding_class": ranked[0].finding_class,
+            "standard_ref": ranked[0].standard_ref,
             "requirement_ids": tuple(sorted({i for f in group for i in f.requirement_ids})),
             "quotes": tuple(quotes.values()),
-            "suggestion": next((f.suggestion for f in ranked if f.suggestion), None),
-            "explanation": f"{win.explanation} (объединено замечаний: {len(group)})",
+            "suggestion": next((f.suggestion for f in (win, *ranked) if f.suggestion), None),
+            "explanation": text,
         }
     )
 
@@ -183,8 +212,10 @@ def consolidate(
     llm: LLMClient | None,
 ) -> GroundingResult:
     """Склеить замечания об одной проблеме; без модели и при её ошибке — без изменений."""
-    findings = tuple(f for f in grounded.findings if f.source is not FindingSource.RULE)
+    findings = grounded.findings
     if llm is None or len(findings) < MIN_FINDINGS:
+        return grounded
+    if all(f.source is FindingSource.RULE for f in findings):
         return grounded
     token = run_token(document.sha256)
     system = _system(*markers(token))
@@ -194,7 +225,7 @@ def consolidate(
     except ModelError:
         return grounded
     by_id = {f.id: f for f in findings}
-    groups = _valid_groups(answer.groups, by_id, document)
+    groups = _valid_groups(answer.groups, by_id)
     if not groups:
         return grounded
     merged_ids = {i for ids in groups for i in ids}

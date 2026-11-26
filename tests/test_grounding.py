@@ -115,6 +115,13 @@ def test_dashes_and_nbsp_and_soft_hyphen() -> None:
     assert result.findings
 
 
+def test_direction_marks_and_control_chars_do_not_break_quote() -> None:
+    from reqcheck.text_norm import norm_text
+
+    assert norm_text("Лимит\u200e 5\u202e\u2066 заявок\x07 в день") == "Лимит 5 заявок в день"
+    assert norm_text("строка\tс табуляцией\nи переносом") == "строка с табуляцией и переносом"
+
+
 def test_case_is_not_normalized() -> None:
     assert not run([raw(("склад должен «оперативно»",))]).findings
 
@@ -215,6 +222,34 @@ def test_rule_and_model_duplicates_merge_preferring_model() -> None:
     assert len(result.findings) == 1
     assert result.findings[0].source is FindingSource.MODEL
     assert result.findings[0].explanation == "Нет порога времени выдачи."
+
+
+def test_set_level_rule_merges_with_model_keeping_rule_severity() -> None:
+    """Правило без id требований и модель на том же месте — одно замечание: текст модели,
+    тип и серьёзность более строгого правила."""
+    rule = raw(
+        ("Курьер обязан подтверждать получение груза подписью.",),
+        ids=(),
+        defect=DefectType.INTERFACE_MISUSE,
+        scope=Scope.REQUIREMENT_SET,
+        source=FindingSource.RULE,
+        explanation="Подпись требуют там, где её нет. Дальше ссылка на стандарт.",
+        impact=Impact.HIGH,
+    )
+    model = raw(
+        ("подтверждать получение груза подписью",),
+        ids=("R-002",),
+        defect=DefectType.INCONSISTENT_TERMS,
+        explanation="Модель объясняет подробно.",
+    )
+    result = run([rule, model])
+    assert len(result.findings) == 1
+    merged = result.findings[0]
+    assert merged.source is FindingSource.MODEL
+    assert merged.explanation == ("Модель объясняет подробно. Подпись требуют там, где её нет.")
+    assert merged.defect_type is DefectType.INTERFACE_MISUSE
+    assert merged.severity is Severity.CRITICAL
+    assert merged.requirement_ids == ("R-002",)
 
 
 def test_overlapping_group_types_merge_to_more_severe() -> None:

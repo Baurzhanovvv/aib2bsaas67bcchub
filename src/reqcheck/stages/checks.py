@@ -230,7 +230,10 @@ def _rank(finding: RawFinding) -> tuple[int, int]:
 
 
 def check_set(
-    document: Document, requirements: tuple[Requirement, ...], llm: LLMClient
+    document: Document,
+    requirements: tuple[Requirement, ...],
+    llm: LLMClient,
+    profile: str | None = None,
 ) -> tuple[list[RawFinding], TraceReport]:
     """Проверить набор по §5.2.6 и IEEE 830 §4.3 и связать критерии приёмки с требованиями.
 
@@ -252,7 +255,7 @@ def check_set(
     for focus in [*focuses, "open"]:
         for number, text in enumerate(texts, start=1):
             part = f"{number} из {len(texts)}" if len(texts) > 1 else None
-            data = _ask_set(llm, token, focus, registry, text, part)
+            data = _ask_set(llm, token, focus, registry, text, part, profile)
             findings += _set_findings(data, focus, requirements)
             if focus == "acceptance":
                 links.extend(data.links)
@@ -261,10 +264,16 @@ def check_set(
 
 
 def _ask_set(
-    llm: LLMClient, token: str, focus: str, registry: str, text: str, part: str | None
+    llm: LLMClient,
+    token: str,
+    focus: str,
+    registry: str,
+    text: str,
+    part: str | None,
+    profile: str | None = None,
 ) -> SetCheckResponse:
     if focus == "open":
-        system = prompts_open.open_system(*markers(token))
+        system = prompts_open.open_system(*markers(token), profile=profile)
         user = prompts_open.open_user(registry, text, part=part)
     else:
         system = prompts.set_system(*markers(token), focus=focus)

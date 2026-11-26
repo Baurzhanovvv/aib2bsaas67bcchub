@@ -85,9 +85,38 @@ def test_binary_garbage_under_md(tmp_path: Path) -> None:
         read_document(write(tmp_path, "a.md", b"\x80\x81\x00\x00abc"))
 
 
-def test_docx_not_supported_yet(tmp_path: Path) -> None:
-    with pytest.raises(InputError, match="DOCX.*позже.*PDF.*Markdown"):
+def _docx(tmp_path: Path) -> Path:
+    import docx
+
+    document = docx.Document()
+    document.add_heading("Склад", level=1)
+    document.add_heading("Списание", level=2)
+    document.add_paragraph("Система должна списывать позицию за 2 секунды.")
+    document.add_paragraph("Первый пункт перечня", style="List Bullet")
+    table = document.add_table(rows=2, cols=2)
+    table.rows[0].cells[0].text, table.rows[0].cells[1].text = "Поле", "Тип"
+    table.rows[1].cells[0].text, table.rows[1].cells[1].text = "weight", "number | null"
+    path = tmp_path / "spec.docx"
+    document.save(str(path))
+    return path
+
+
+def test_docx_is_read_through_markdown(tmp_path: Path) -> None:
+    document = read_document(_docx(tmp_path))
+    assert document.format is DocumentFormat.DOCX
+    kinds = [f.kind for f in document.fragments]
+    assert kinds.count(FragmentKind.HEADING) == 2
+    assert FragmentKind.LIST_ITEM in kinds and FragmentKind.TABLE_ROW in kinds
+    paragraph = next(f for f in document.fragments if f.kind is FragmentKind.PARAGRAPH)
+    assert paragraph.text == "Система должна списывать позицию за 2 секунды."
+    assert paragraph.section == ("Склад", "Списание")
+
+
+def test_broken_docx_is_input_error(tmp_path: Path) -> None:
+    with pytest.raises(InputError, match="не читается как DOCX"):
         read_document(write(tmp_path, "a.docx", b"PK\x03\x04"))
+    with pytest.raises(InputError, match="расширение .docx"):
+        read_document(write(tmp_path, "b.docx", b"%PDF-1.7 not a docx"))
 
 
 def test_unknown_extension(tmp_path: Path) -> None:
@@ -290,3 +319,43 @@ def test_pdf_table_rows(tmp_path: Path) -> None:
     doc = read_document(path)
     rows = [f.text for f in doc.fragments if f.kind is FragmentKind.TABLE_ROW]
     assert rows == ["| Field | Value |", "| Timeout | 30 sec |", "| Retries | 3 |"]
+
+
+def test_fenced_code_line_is_the_line_of_its_text(tmp_path: Path) -> None:
+    text = '# Склад\n\nПример:\n\n```json\n\n{"a": 1}\n{"b": 2}\n```\n'
+    document = read_document(write(tmp_path, "a.md", text.encode()))
+    code = next(f for f in document.fragments if f.kind is FragmentKind.CODE)
+    assert code.text.startswith('{"a": 1}')
+    assert code.location.line_start == 7
+
+
+def test_docx_keeps_review_insertions_nested_tables_and_literal_marks(tmp_path: Path) -> None:
+    import docx
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    document = docx.Document()
+    para = document.add_paragraph("Начало ")
+    inserted, run, text = OxmlElement("w:ins"), OxmlElement("w:r"), OxmlElement("w:t")
+    text.text = "вставка рецензента"
+    run.append(text)
+    inserted.append(run)
+    para._p.append(inserted)
+    document.add_paragraph("# не заголовок")
+    table = document.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "снаружи"
+    table.rows[0].cells[1].add_table(rows=1, cols=1).rows[0].cells[0].text = "вложенная"
+    body = document.element.body
+    sdt, content = OxmlElement("w:sdt"), OxmlElement("w:sdtContent")
+    field = document.add_paragraph("Текст поля шаблона")._p
+    content.append(field)
+    sdt.append(content)
+    body.insert(len(body) - 1, sdt)
+    assert sdt.find(qn("w:sdtContent")) is not None
+    path = tmp_path / "review.docx"
+    document.save(str(path))
+    read = read_document(path)
+    texts = " / ".join(f.text for f in read.fragments)
+    for expected in ("вставка рецензента", "вложенная", "Текст поля шаблона", "# не заголовок"):
+        assert expected in texts
+    assert not [f for f in read.fragments if f.kind is FragmentKind.HEADING]

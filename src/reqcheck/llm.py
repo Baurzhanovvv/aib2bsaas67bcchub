@@ -38,6 +38,8 @@ class LLMUsage(Contract):
     tokens_out: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0)
     """Расчётная стоимость запросов прогона в долларах; 0 для бесплатных моделей."""
+    invalid_items: int = Field(default=0, ge=0)
+    """Сколько элементов ответа (замечаний, связей) отброшено как не прошедшие схему."""
 
 
 class LLMClient(Protocol):

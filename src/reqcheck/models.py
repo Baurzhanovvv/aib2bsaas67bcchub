@@ -322,6 +322,10 @@ class Passport(Contract):
     tokens_in: int = Field(default=0, ge=0)
     tokens_out: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0)
+    profile: str | None = None
+    """Профиль домена, включённый флагом `--profile` (FR-19); None — общий прогон."""
+    invalid_items: int = Field(default=0, ge=0)
+    """Элементы ответа модели, отброшенные как не прошедшие схему (остальной ответ принят)."""
     quotes_checked: int = Field(default=0, ge=0)
     quotes_confirmed: int = Field(default=0, ge=0)
     findings_dropped: int = Field(default=0, ge=0)

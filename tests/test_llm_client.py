@@ -1,7 +1,9 @@
 """Клиент модели: схема, повторы, фолбэк, кэш, учёт. Сеть не используется."""
 
+import json
 from pathlib import Path
 from random import Random
+from typing import Literal
 
 import pytest
 from pydantic import BaseModel
@@ -378,3 +380,43 @@ class Inner(BaseModel):
 class Ticket2(BaseModel):
     title: str
     inner: Inner
+
+
+# --- мягкий разбор: битый элемент списка не стоит всего ответа ---
+
+
+class _Item(BaseModel):
+    kind: Literal["a", "b"]
+    text: str
+
+
+class _Bag(BaseModel):
+    items: list[_Item]
+    note: str = ""
+
+
+def _bag(*kinds: str) -> str:
+    return json.dumps({"items": [{"kind": k, "text": "t"} for k in kinds]})
+
+
+def test_broken_list_item_is_dropped_and_counted() -> None:
+    p = FakeProvider([_bag("a", "zzz", "b")])
+    client = make(p)
+    res = client.complete(system="sys", user="usr", response_model=_Bag)
+    assert [i.kind for i in res.data.items] == ["a", "b"]
+    assert len(p.calls) == 1
+    assert client.usage().invalid_items == 1
+
+
+def test_mostly_broken_answer_is_asked_again() -> None:
+    p = FakeProvider([_bag("zzz", "yyy", "a"), _bag("a")])
+    client = make(p)
+    res = client.complete(system="sys", user="usr", response_model=_Bag)
+    assert len(p.calls) == 2 and len(res.data.items) == 1
+    assert client.usage().invalid_items == 0
+
+
+def test_broken_envelope_is_not_salvaged() -> None:
+    p = FakeProvider(['{"items": [], "note": 5}', "[]"])
+    with pytest.raises(ModelError, match="дважды"):
+        make(p).complete(system="sys", user="usr", response_model=_Bag)

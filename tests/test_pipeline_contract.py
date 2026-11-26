@@ -21,7 +21,7 @@ EXPECTED_PARAMS = {
     registry.build_registry: ["document", "llm"],
     rules.apply_rules: ["document", "requirements"],
     checks.check_requirements: ["requirements", "llm", "document"],
-    checks.check_set: ["document", "requirements", "llm"],
+    checks.check_set: ["document", "requirements", "llm", "profile"],
     grounding.verify_and_classify: ["document", "requirements", "raw"],
     consolidate.consolidate: ["document", "requirements", "grounded", "llm"],
     report.build_report: [
@@ -32,6 +32,7 @@ EXPECTED_PARAMS = {
         "usage",
         "duration_s",
         "model_error",
+        "profile",
     ],
 }
 

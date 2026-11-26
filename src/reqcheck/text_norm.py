@@ -7,6 +7,9 @@ from dataclasses import dataclass
 _QUOTE_CHARS = "«»„“”‟‹›〝〞\"'‘’‚‛"
 _DASH_CHARS = "‐‑‒–—―−⁃﹘﹣－-"
 _INVISIBLE = "­​‌‍⁠﻿"
+# Форматные и управляющие символы (метки направления письма, остатки PDF): в тексте
+# не видны, но ломают дословное совпадение цитаты и годятся для скрытой вставки.
+_CONTROL = ("Cf", "Cc")
 # Разметка выделения Markdown: `*` и обратные кавычки убираем всегда, `_` только серией `__`
 # (одиночный `_` бывает внутри идентификаторов вроде snake_case).
 _MARKUP = "*`"
@@ -63,6 +66,8 @@ def _tokens(text: str) -> list[list]:
     for cluster, start, end in _clusters(text):
         for char in unicodedata.normalize("NFKC", cluster):
             if char in _INVISIBLE or char in _MARKUP or start in skipped:
+                continue
+            if not char.isspace() and unicodedata.category(char) in _CONTROL:
                 continue
             if char.isspace():
                 if tokens and tokens[-1][0] == " ":

@@ -42,13 +42,18 @@ def parse_markdown(source: str, next_id: Callable[[], str]) -> list[Fragment]:
     headings: list[tuple[int, str]] = []
     containers: list[str] = []
 
-    def emit(kind: FragmentKind, text: str, token: Token) -> None:
+    def emit(kind: FragmentKind, text: str, token: Token, skip: int = 0) -> None:
+        """skip — сколько первых строк блока не вошло в текст (строка ограды кода)."""
         if text:
             section = tuple(title for _, title in headings)
+            where = _location(token)
+            if skip:
+                start = min(where.line_start + skip, where.line_end)
+                # Конец — последняя строка текста, а не закрывающая ограда.
+                end = min(where.line_end, start + text.count("\n"))
+                where = Location(line_start=start, line_end=max(start, end))
             fragments.append(
-                Fragment(
-                    id=next_id(), kind=kind, text=text, location=_location(token), section=section
-                )
+                Fragment(id=next_id(), kind=kind, text=text, location=where, section=section)
             )
 
     index = 0
@@ -74,7 +79,10 @@ def parse_markdown(source: str, next_id: Callable[[], str]) -> list[Fragment]:
             para = FragmentKind.LIST_ITEM if in_item else FragmentKind.PARAGRAPH
             emit(para, _raw_lines(lines, token), token)
         elif kind in ("fence", "code_block"):
-            emit(FragmentKind.CODE, token.content.strip("\n").rstrip(), token)
+            body = token.content
+            blank = len(body) - len(body.lstrip("\n"))
+            # У блока в ограде первая строка — сама ограда, текст начинается со следующей.
+            emit(FragmentKind.CODE, body.strip("\n").rstrip(), token, (kind == "fence") + blank)
         elif kind == "table_open":
             start, end = token.map or (0, 0)
             for number in range(start, end):

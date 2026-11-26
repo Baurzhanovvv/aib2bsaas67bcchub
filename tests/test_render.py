@@ -197,19 +197,35 @@ def test_verdict_texts_and_fix_first() -> None:
     assert "Начинать разработку нельзя" in text
     assert "1. D-001 (R-001): Задать порог." in text
 
+    full = make_report().passport.model_copy(update={"mode": RunMode.FULL, "model": "m-1"})
     go = make_report(
+        passport=full,
         verdict=Verdict.GO,
         findings=(),
         summary=Summary(requirements_total=1, findings_total=0),
     )
     assert "Можно начинать." in render_markdown(go)
 
-    cond = make_report(
-        verdict=Verdict.CONDITIONAL_GO,
-        findings=(),
-        summary=Summary(requirements_total=1, findings_total=0),
-    )
+    critical = with_finding(id="D-001", severity=Severity.CRITICAL)
+    cond = make_report(passport=full, verdict=Verdict.CONDITIONAL_GO, findings=(critical,))
     assert "Можно начинать с условием" in render_markdown(cond)
+
+
+def test_incomplete_check_never_says_go() -> None:
+    """Модель не отработала или страницы не прочитаны — «можно начинать» не пишем."""
+    critical = with_finding(id="D-001", severity=Severity.CRITICAL)
+    rules_only = make_report(verdict=Verdict.CONDITIONAL_GO, findings=(critical,))
+    empty = make_report(verdict=Verdict.CONDITIONAL_GO, findings=())
+    unread = make_report().passport.model_copy(
+        update={"mode": RunMode.FULL, "model": "m-1", "unread_pages": (2,)}
+    )
+    degraded = make_report(passport=unread, verdict=Verdict.CONDITIONAL_GO, findings=())
+    for report in (rules_only, empty, degraded):
+        text = render_markdown(report)
+        assert text.count("Итог не определён: проверка неполная") == 2
+        assert "Можно начинать" not in text
+    assert "Найденные критичные дефекты — ниже." in render_markdown(rules_only)
+    assert "Найденные критичные дефекты" not in render_markdown(empty)
 
 
 def test_model_error_warnings() -> None:

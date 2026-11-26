@@ -57,10 +57,11 @@ missing_requirement с цитатой условия; suggestion: «Вопрос
 «требует проверки»»."""
 
 
-def open_system(open_marker: str, close_marker: str) -> str:
-    """System свободного прохода: общие правила плюс широкая задача."""
+def open_system(open_marker: str, close_marker: str, profile: str | None = None) -> str:
+    """System свободного прохода: общие правила плюс широкая задача и профиль домена (FR-19)."""
     role, *rules = prompts.common_parts()
-    text = "\n\n".join([role, _OPEN_TASK, *rules])
+    task = f"{_OPEN_TASK}\n\n{profile}" if profile else _OPEN_TASK
+    text = "\n\n".join([role, task, *rules])
     return prompts.fill_markers(text, open_marker, close_marker)
 
 

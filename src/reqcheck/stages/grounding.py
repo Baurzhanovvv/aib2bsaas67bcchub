@@ -1,5 +1,6 @@
 """Проверка цитат (FR-7), справочник разметки (FR-9), дедупликация (FR-16)."""
 
+import re
 from dataclasses import dataclass, replace
 
 from reqcheck import taxonomy
@@ -12,6 +13,7 @@ from reqcheck.models import (
     Fragment,
     FragmentKind,
     GroundingResult,
+    Impact,
     Location,
     Quote,
     RawFinding,
@@ -162,6 +164,17 @@ def _severity(raw: RawFinding, hits: tuple[_Hit, ...], index: _Index) -> Severit
     if promote and raw.defect_type in taxonomy.ACCEPTANCE_PROMOTED_TYPES:
         if RequirementKind.ACCEPTANCE in kinds:
             return Severity.BLOCKER
+    # Два бизнес-правила, которые нельзя выполнить разом, блокируют разработку при любой
+    # оценке последствия моделью: реализовать можно только одно из них.
+    owners = {h.requirement_id for h in hits if h.requirement_id}
+    if (
+        raw.defect_type is DefectType.CONTRADICTION
+        and raw.impact is not Impact.LOW
+        and len(owners) >= 2
+        and kinds
+        and kinds <= taxonomy.BLOCKER_REQUIREMENT_KINDS
+    ):
+        return Severity.BLOCKER
     # Блокирует разработку расхождение в бизнес-поведении, а не в оформлении протокола.
     if severity is Severity.BLOCKER and not kinds & taxonomy.BLOCKER_REQUIREMENT_KINDS:
         return Severity.CRITICAL
@@ -245,13 +258,33 @@ def _overlap_ratio(x: _Hit, y: _Hit) -> float:
 
 
 def _mergeable(a: _Cand, b: _Cand) -> bool:
-    """Одна группа типов, общие id (или оба без id), цитаты перекрыты не меньше чем наполовину."""
+    """Одна группа типов, общие id (или оба без id), цитаты перекрыты не меньше чем наполовину.
+
+    Правило и модель на одном месте — одна находка, даже если id требований у них разные:
+    правило уровня набора может не называть требований вовсе."""
     ids_ok = (not a.ids and not b.ids) or bool(set(a.ids) & set(b.ids))
+    if a.raw.source is not b.raw.source:
+        # Правило вливается в замечание модели того же типа либо в то, что процитировало
+        # все его места: иначе цитаты правила остались бы в отчёте без объяснения.
+        rule, model = (a, b) if a.raw.source is FindingSource.RULE else (b, a)
+        ids_ok = rule.raw.defect_type is model.raw.defect_type or all(
+            any(_overlap_ratio(x, y) >= MERGE_OVERLAP for y in model.hits) for x in rule.hits
+        )
     return (
         ids_ok
         and _same_group(a.raw.defect_type, b.raw.defect_type)
         and any(_overlap_ratio(x, y) >= MERGE_OVERLAP for x in a.hits for y in b.hits)
     )
+
+
+# Точка после цифры («200. Successful») концом предложения не считается.
+_SENTENCE_END = re.compile(r"(?<=[^\d\s][.!?])\s+(?=[A-ZА-ЯЁ])")
+
+
+def with_rule_fact(text: str, rule_text: str) -> str:
+    """Дописать к пояснению модели первое предложение пояснения правила."""
+    fact = _SENTENCE_END.split(rule_text, maxsplit=1)[0]
+    return text if fact in text else f"{text.rstrip()} {fact}"
 
 
 def _combine(a: _Cand, b: _Cand) -> _Cand:
@@ -268,6 +301,17 @@ def _combine(a: _Cand, b: _Cand) -> _Cand:
         )
 
     win, lose = (a, b) if order(a) <= order(b) else (b, a)
+    rule, model = (win, lose) if win.raw.source is FindingSource.RULE else (lose, win)
+    if rule.raw.source is not model.raw.source:
+        # Текст и вопрос заказчику — у модели; тип и серьёзность берём у победителя,
+        # а факт правила другого типа дописываем, чтобы он не пропал при склейке.
+        text = model.raw.explanation
+        if rule.raw.defect_type is not model.raw.defect_type:
+            text = with_rule_fact(text, rule.raw.explanation)
+        kept = model.raw.model_copy(
+            update={"defect_type": win.raw.defect_type, "explanation": text}
+        )
+        win, lose = replace(model, raw=kept, severity=win.severity), rule
     extra = tuple(h for h in lose.hits if not any(_hits_overlap(h, w) for w in win.hits))
     return replace(
         win,
