@@ -107,7 +107,7 @@ def finding(ids: tuple[str, ...], defect: DefectType = DefectType.AMBIGUOUS) -> 
     )
 
 
-def test_60_requirements_three_batches_of_twenty_and_six_calls_total() -> None:
+def test_60_requirements_three_batches_of_twenty_and_seven_calls_total() -> None:
     reqs = tuple(
         req(i, RequirementKind.ACCEPTANCE if i > 55 else RequirementKind.FUNCTIONAL)
         for i in range(1, 61)
@@ -119,7 +119,7 @@ def test_60_requirements_three_batches_of_twenty_and_six_calls_total() -> None:
         assert model is RequirementCheckResponse
         assert user.count("; раздел: —") == 20
     checks.check_set(document(reqs), reqs, llm)
-    assert len(llm.calls) == 6
+    assert len(llm.calls) == 7
 
 
 @pytest.mark.parametrize(("count", "sizes"), [(1, [1]), (25, [25]), (26, [13, 13]), (51, [17] * 3)])
@@ -248,19 +248,19 @@ def test_no_acceptance_gives_empty_trace() -> None:
     _, trace = checks.check_set(document(reqs), reqs, llm)
     assert trace.links == () and trace.uncovered_requirement_ids == ()
     assert trace.orphan_acceptance_ids == ()
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 3
     assert not any(ACC in system for system, _, _ in llm.calls)
 
 
-def test_set_check_three_narrow_calls_with_shared_context() -> None:
+def test_set_check_four_calls_with_shared_context() -> None:
     reqs = (req(1), req(2, RequirementKind.ACCEPTANCE))
     llm = FakeLLM()
     checks.check_set(document(reqs), reqs, llm)
-    assert len(llm.calls) == 3
+    assert len(llm.calls) == 4
     systems = [system for system, _, _ in llm.calls]
     for key in (RULES, ACC, IFACE):
         assert sum(key in system for system in systems) == 1
-    assert len({user for _, user, _ in llm.calls}) == 1
+    assert len({user for _, user, _ in llm.calls}) == 2
     user = llm.calls[0][1]
     assert "[R-002] acceptance | Приёмка товара | Требование 2" in user
     assert "[R-001] Склад принимает поставку номер 1" in user
@@ -293,7 +293,7 @@ def test_large_document_split_by_top_sections_with_full_registry(
     doc = Document(name="d.md", sha256=SHA, format=DocumentFormat.MARKDOWN, fragments=fragments)
     llm = FakeLLM()
     checks.check_set(doc, reqs, llm)
-    assert len(llm.calls) == 4
+    assert len(llm.calls) == 6
     for _, user, _ in llm.calls:
         assert "[R-001] functional" in user and "[R-002] functional" in user
     assert "часть 1 из 2" in llm.calls[0][1]

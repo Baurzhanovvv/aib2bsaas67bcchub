@@ -1,21 +1,37 @@
 """Отчёт в Markdown: шесть разделов задания (FR-10). PDF и HTML — FR-22."""
 
-import re
 from collections import defaultdict
 from datetime import datetime
 
 from reqcheck.models import (
     Finding,
-    Location,
     Report,
     RunMode,
     Scope,
     Severity,
     Verdict,
 )
-from reqcheck.stages.render_labels import CRITERION_RU, DEFECT_RU, KIND_RU, SEVERITY_RU
+from reqcheck.stages.render_labels import CRITERION_RU, DEFECT_RU, SEVERITY_RU
+from reqcheck.stages.render_tables import (
+    acceptance_table,
+    coverage_table,
+    customer_questions,
+    registry_table,
+    severity_table,
+)
+from reqcheck.stages.render_tables import (
+    place as _place,
+)
+from reqcheck.stages.render_tables import (
+    plain as _plain,
+)
+from reqcheck.stages.render_tables import (
+    short as _short,
+)
+from reqcheck.stages.render_tables import (
+    table as _table,
+)
 
-TABLE_QUOTE_LIMIT = 100
 BRIEF_TOP = 5
 BRIEF_EXPLANATION_LIMIT = 120
 
@@ -28,43 +44,9 @@ SEVERITY_ORDER = (Severity.BLOCKER, Severity.CRITICAL, Severity.MAJOR, Severity.
 # --- Мелкие помощники ---------------------------------------------------------------
 
 
-def _cell(text: str) -> str:
-    """Безопасное содержимое ячейки таблицы: без переноса строк и неэкранированных `|`."""
-    flat = " ".join(text.split())
-    return flat.replace("\\", "\\\\").replace("|", "\\|")
-
-
 def _inline(text: str) -> str:
     """Текст от модели в одну строку: переносом нельзя начать свой заголовок или раздел."""
     return " ".join(text.split())
-
-
-_MARKUP = re.compile(r"\*\*|__|`")
-
-
-def _plain(text: str) -> str:
-    """Убрать Markdown-выделение (**, __, обратные кавычки); слова остаются дословными."""
-    return _MARKUP.sub("", text)
-
-
-def _short(text: str, limit: int = TABLE_QUOTE_LIMIT) -> str:
-    flat = " ".join(_plain(text).split())
-    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
-
-
-def _place(loc: Location) -> str:
-    """«строка 42», «строки 12–14», «стр. 3, строка 12»."""
-    if loc.line_start == loc.line_end:
-        lines = f"строка {loc.line_start}"
-    else:
-        lines = f"строки {loc.line_start}–{loc.line_end}"
-    return f"стр. {loc.page}, {lines}" if loc.page is not None else lines
-
-
-def _table(header: tuple[str, ...], rows: list[tuple[str, ...]]) -> list[str]:
-    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
-    lines += ["| " + " | ".join(_cell(c) for c in row) + " |" for row in rows]
-    return lines
 
 
 def _blockquote(text: str) -> list[str]:
@@ -129,16 +111,11 @@ def _passport(report: Report) -> list[str]:
 
 
 def _registry(report: Report) -> list[str]:
-    rows = [
-        (r.id, r.source_id or "—", KIND_RU[r.kind], _short(r.summary), _place(r.location))
-        for r in report.requirements
-    ]
     head = "## 2. Реестр требований"
     note = "Идентификатор в документе указан, если он там был; «—» значит, что агент присвоил свой."
-    if not rows:
+    if not report.requirements:
         return [head, "", "Требования в документе не найдены."]
-    header = ("ID в отчёте", "ID в документе", "Тип", "Кратко", "Место")
-    return [head, "", note, "", *_table(header, rows)]
+    return [head, "", note, "", *registry_table(report)]
 
 
 def _finding_block(f: Finding) -> list[str]:
@@ -235,7 +212,7 @@ def _set_check(report: Report) -> list[str]:
         out += _finding_block(f)
     if report.set_check_done and not set_findings:
         out += ["Замечаний к набору в целом нет.", ""]
-    return [*out, *_trace(report)]
+    return [*out, *acceptance_table(report), *_trace(report)]
 
 
 def _finding_target(f: Finding) -> str:
@@ -251,8 +228,7 @@ def _summary(report: Report) -> list[str]:
         f"- Требований: {s.requirements_total}",
         f"- Замечаний: {s.findings_total}",
     ]
-    for sev in SEVERITY_ORDER:
-        out.append(f"  - {SEVERITY_RU[sev]}: {s.by_severity.get(sev, 0)}")
+    out += ["", *severity_table(report)]
     out += ["", "Критичные дефекты (блокирующие и критичные):", ""]
     rows = []
     for fid in sorted(s.critical_finding_ids):
@@ -269,7 +245,7 @@ def _summary(report: Report) -> list[str]:
         out += _table(("Замечание", "Тип", "Требование", "Цитата"), rows)
     else:
         out.append("Критичных дефектов нет.")
-    return out
+    return [*out, "", *coverage_table(report)]
 
 
 def _verdict_text(report: Report) -> str:
@@ -301,6 +277,7 @@ def _verdict(report: Report) -> list[str]:
             for f in crit
         ]
         out.append("")
+    out += customer_questions(report)
     out.append("Исправить в первую очередь:")
     out.append("")
     if not report.fix_first:

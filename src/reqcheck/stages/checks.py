@@ -12,7 +12,7 @@ from collections.abc import Iterable
 
 from pydantic import ValidationError
 
-from reqcheck import prompts
+from reqcheck import prompts, prompts_open
 from reqcheck.llm import (
     FindingDraft,
     LinkDraft,
@@ -70,10 +70,9 @@ FOCUS_TYPES: dict[str, frozenset[DefectType]] = {
             _D.DESIGN_CONSTRAINT,
         }
     ),
+    "open": frozenset(DefectType),
 }
-"""FR-6 — три узких вызова, у каждого свой список типов (prompts.SET_FOCUSES)."""
-SET_TYPES = frozenset().union(*FOCUS_TYPES.values())
-"""Свойства одного требования — в FR-5; incomplete — для служебных блоков вне реестра."""
+"""FR-6 — три узких вызова (prompts.SET_FOCUSES) и свободный проход "open" со всеми типами."""
 TRACED_KINDS = frozenset({RequirementKind.FUNCTIONAL})
 """Покрытие приёмкой ждём только у бизнес-правил; строки API им не покрываются."""
 
@@ -235,8 +234,9 @@ def check_set(
 ) -> tuple[list[RawFinding], TraceReport]:
     """Проверить набор по §5.2.6 и IEEE 830 §4.3 и связать критерии приёмки с требованиями.
 
-    Три узких вызова с общим контекстом: совместимость правил, прогон критериев приёмки
-    (и трассировка), интерфейс и данные. Без критериев приёмки второй не вызывается.
+    Три узких вызова с общим контекстом — совместимость правил, прогон критериев приёмки
+    (и трассировка), интерфейс и данные — и свободный проход по всему документу без реестра
+    как рамки. Без критериев приёмки второй узкий вызов не делается.
     """
     if not requirements:
         return [], TraceReport()
@@ -248,19 +248,28 @@ def check_set(
     texts = [wrap(token, render_fragments(chunk, requirements)) for chunk in chunks]
     findings: list[RawFinding] = []
     links: list[LinkDraft] = []
-    for focus in prompts.SET_FOCUSES:
-        if focus == "acceptance" and not has_acceptance:
-            continue
-        system = prompts.set_system(*markers(token), focus=focus)
+    focuses = [f for f in prompts.SET_FOCUSES if f != "acceptance" or has_acceptance]
+    for focus in [*focuses, "open"]:
         for number, text in enumerate(texts, start=1):
             part = f"{number} из {len(texts)}" if len(texts) > 1 else None
-            user = prompts.set_user(registry, text, part=part)
-            result = llm.complete(system=system, user=user, response_model=SetCheckResponse)
-            findings += _set_findings(result.data, focus, requirements)
+            data = _ask_set(llm, token, focus, registry, text, part)
+            findings += _set_findings(data, focus, requirements)
             if focus == "acceptance":
-                links.extend(result.data.links)
+                links.extend(data.links)
     trace = build_trace(links, requirements) if has_acceptance else TraceReport()
     return _dedupe(findings), trace
+
+
+def _ask_set(
+    llm: LLMClient, token: str, focus: str, registry: str, text: str, part: str | None
+) -> SetCheckResponse:
+    if focus == "open":
+        system = prompts_open.open_system(*markers(token))
+        user = prompts_open.open_user(registry, text, part=part)
+    else:
+        system = prompts.set_system(*markers(token), focus=focus)
+        user = prompts.set_user(registry, text, part=part)
+    return llm.complete(system=system, user=user, response_model=SetCheckResponse).data
 
 
 def _set_findings(

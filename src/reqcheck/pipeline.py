@@ -13,7 +13,16 @@ from pathlib import Path
 from reqcheck.errors import ExitCode, InputError, ModelError
 from reqcheck.llm import LLMClient
 from reqcheck.models import RawFinding, Report, Requirement, TraceReport, Verdict
-from reqcheck.stages import checks, grounding, reader, registry, render, report, rules
+from reqcheck.stages import (
+    checks,
+    consolidate,
+    grounding,
+    reader,
+    registry,
+    render,
+    report,
+    rules,
+)
 
 
 def _model_checks(
@@ -48,6 +57,8 @@ def build(input_path: Path, llm: LLMClient | None) -> Report:
         raw += model_found
 
     grounded = grounding.verify_and_classify(document, requirements, raw)
+    merger = llm if model_error is None else None
+    grounded = consolidate.consolidate(document, requirements, grounded, merger)
     usage = llm.usage() if llm is not None else None
     duration_s = time.monotonic() - started
     return report.build_report(

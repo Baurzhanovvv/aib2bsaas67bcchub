@@ -92,8 +92,10 @@ class FakeModel:
                     ),
                 )
             )
-        else:
+        elif response_model is SetCheckResponse:
             data = SetCheckResponse()
+        else:  # прочие этапы (склейка дублей) — пустой ответ своей схемы
+            data = response_model()
         return LLMResult(data=data, model="fake-model")
 
     def usage(self) -> LLMUsage:

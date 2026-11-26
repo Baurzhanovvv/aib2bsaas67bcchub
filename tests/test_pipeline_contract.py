@@ -13,7 +13,7 @@ from reqcheck import pipeline
 from reqcheck.errors import InputError, ModelError
 from reqcheck.llm import LLMUsage
 from reqcheck.models import GroundingResult, TraceReport, Verdict
-from reqcheck.stages import checks, grounding, reader, registry, report, rules
+from reqcheck.stages import checks, consolidate, grounding, reader, registry, report, rules
 from tests.factories import make_document, make_report, make_requirement
 
 EXPECTED_PARAMS = {
@@ -23,6 +23,7 @@ EXPECTED_PARAMS = {
     checks.check_requirements: ["requirements", "llm", "document"],
     checks.check_set: ["document", "requirements", "llm"],
     grounding.verify_and_classify: ["document", "requirements", "raw"],
+    consolidate.consolidate: ["document", "requirements", "grounded", "llm"],
     report.build_report: [
         "document",
         "requirements",
@@ -57,6 +58,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     monkeypatch.setattr(checks, "check_requirements", lambda reqs, llm, document=None: [])
     monkeypatch.setattr(checks, "check_set", lambda doc, reqs, llm: ([], TraceReport()))
     monkeypatch.setattr(grounding, "verify_and_classify", lambda doc, reqs, raw: GroundingResult())
+    monkeypatch.setattr(consolidate, "consolidate", lambda doc, reqs, grounded, llm: grounded)
 
     def fake_build_report(document, requirements, grounded, trace, usage, duration_s, **kw):
         seen.update(trace=trace, usage=usage, model_error=kw.get("model_error"))
