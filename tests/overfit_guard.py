@@ -96,10 +96,20 @@ def _is_content_shingle(sh: tuple[str, ...]) -> bool:
     return sum(1 for w in sh if w not in STOP_WORDS) >= MIN_CONTENT_WORDS
 
 
-def extract_signatures(text: str) -> Signatures:
-    sig = Signatures()
+def _id_tokens(text: str) -> list[str]:
+    """Токен целиком и его части между «/»: имя операции внутри пути тоже признак."""
+    found: list[str] = []
     for m in _ID_TOKEN_RE.finditer(text):
         tok = m.group(0).strip(".:-")
+        found.append(tok)
+        if "/" in tok:
+            found += [part.strip(".:-") for part in tok.split("/") if part]
+    return found
+
+
+def extract_signatures(text: str) -> Signatures:
+    sig = Signatures()
+    for tok in _id_tokens(text):
         if _is_identifier(tok):
             sig.identifiers.add(tok.lower())
     for m in _NUMBER_RE.finditer(text):
@@ -148,8 +158,7 @@ def iter_scan_files(root: Path) -> list[Path]:
 def scan_text(text: str, sig: Signatures, path: Path) -> list[Hit]:
     hits: list[Hit] = []
     for n, line in enumerate(text.splitlines(), start=1):
-        for m in _ID_TOKEN_RE.finditer(line):
-            tok = m.group(0).strip(".:-")
+        for tok in _id_tokens(line):
             if tok.lower() in sig.identifiers:
                 hits.append(Hit(path, n, tok))
         for m in _NUMBER_RE.finditer(line):

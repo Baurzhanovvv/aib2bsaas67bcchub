@@ -318,7 +318,35 @@ def test_pdf_table_rows(tmp_path: Path) -> None:
     pdf.save(path)
     doc = read_document(path)
     rows = [f.text for f in doc.fragments if f.kind is FragmentKind.TABLE_ROW]
-    assert rows == ["| Field | Value |", "| Timeout | 30 sec |", "| Retries | 3 |"]
+    # После шапки — разделитель, как в Markdown: шапку не примут за требование.
+    assert rows == ["| Field | Value |", "| --- | --- |", "| Timeout | 30 sec |", "| Retries | 3 |"]
+    lines = [f.location.line_start for f in doc.fragments if f.kind is FragmentKind.TABLE_ROW]
+    assert lines == [1, 1, 2, 3]
+
+
+def test_pdf_id_led_lines_code_and_numbered_heading(tmp_path: Path) -> None:
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    rows = [
+        ("Rules", "hebo", 11),
+        ("AB-1. Склад принимает груз в день прибытия.", "helv", 11),
+        ("AB-2. Склад выдаёт груз по накладной.", "helv", 11),
+        ("201. Created", "hebo", 11),
+        ('{"state":"done"}', "cour", 11),
+    ]
+    text = "\n".join(row[0] for row in rows[1:3])
+    page.insert_text((60, 80), rows[0][0], fontsize=11, fontname="hebo")
+    page.insert_textbox((60, 100, 500, 160), text, fontsize=11, fontname="tiro", encoding=2)
+    page.insert_text((60, 200), rows[3][0], fontsize=11, fontname="hebo")
+    page.insert_text((60, 230), rows[4][0], fontsize=11, fontname="cour")
+    path = tmp_path / "ids.pdf"
+    pdf.save(path)
+    doc = read_document(path)
+    kinds = [(f.kind, f.text[:5]) for f in doc.fragments]
+    assert (FragmentKind.HEADING, "201. ") in kinds
+    assert (FragmentKind.CODE, '{"sta') in kinds
+    items = [f for f in doc.fragments if f.kind is FragmentKind.LIST_ITEM]
+    assert [f.text[:4] for f in items] == ["AB-1", "AB-2"]
 
 
 def test_fenced_code_line_is_the_line_of_its_text(tmp_path: Path) -> None:
@@ -359,3 +387,29 @@ def test_docx_keeps_review_insertions_nested_tables_and_literal_marks(tmp_path: 
     for expected in ("вставка рецензента", "вложенная", "Текст поля шаблона", "# не заголовок"):
         assert expected in texts
     assert not [f for f in read.fragments if f.kind is FragmentKind.HEADING]
+
+
+def test_pdf_technical_term_does_not_split_sentence(tmp_path: Path) -> None:
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    text = (
+        "The system shall encrypt every stored backup file using the algorithm\n"
+        "AES-256 with a key rotated every ninety days."
+    )
+    page.insert_textbox((60, 100, 520, 200), text, fontsize=11, fontname="helv")
+    path = tmp_path / "aes.pdf"
+    pdf.save(path)
+    doc = read_document(path)
+    assert [f.kind for f in doc.fragments] == [FragmentKind.PARAGRAPH]
+
+
+def test_pdf_large_heading_with_identifier_stays_heading(tmp_path: Path) -> None:
+    pdf = pymupdf.open()
+    page = pdf.new_page()
+    page.insert_text((60, 80), "FR-1: Login", fontsize=16, fontname="hebo")
+    page.insert_text((60, 120), "The system shall check the password of the user.", fontsize=10)
+    path = tmp_path / "head.pdf"
+    pdf.save(path)
+    doc = read_document(path)
+    assert doc.fragments[0].kind is FragmentKind.HEADING
+    assert doc.fragments[1].section == ("FR-1: Login",)

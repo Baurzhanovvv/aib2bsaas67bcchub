@@ -3,11 +3,13 @@
 import re
 from collections import defaultdict
 
+from reqcheck import taxonomy
 from reqcheck.models import DefectType, Finding, Location, Report, RequirementKind, Severity
-from reqcheck.stages.render_labels import KIND_RU, SEVERITY_RU
+from reqcheck.stages.render_labels import DEFECT_RU, KIND_RU, SEVERITY_RU
 
 TABLE_QUOTE_LIMIT = 100
 REGISTRY_SUMMARY_LIMIT = 80
+REGISTRY_QUOTE_LIMIT = 90
 OUTSIDE_SECTIONS = "вне разделов"
 QUESTION_PREFIX = "вопрос заказчику"
 SEVERITY_MARK: dict[Severity, str] = {
@@ -82,12 +84,36 @@ def registry_table(report: Report) -> list[str]:
             r.source_id or "—",
             KIND_RU[r.kind],
             short(r.summary, REGISTRY_SUMMARY_LIMIT),
+            "«" + short(r.quote, REGISTRY_QUOTE_LIMIT) + "»",
             place(r.location),
             _ids(by_req.get(r.id, [])),
         )
         for r in report.requirements
     ]
-    header = ("ID в отчёте", "ID в документе", "Тип", "Кратко", "Место", "Замечания")
+    header = ("ID в отчёте", "ID в документе", "Тип", "Кратко", "Цитата", "Место", "Замечания")
+    return table(header, rows)
+
+
+def verdict_table(report: Report, checked_by_model: bool) -> list[str]:
+    """Результат по каждому требованию: худшая серьёзность и все замечания, где оно названо."""
+    by_req = findings_by_requirement(report)
+    clean = "замечаний нет" if checked_by_model else "правилами не найдено"
+    rows = []
+    for r in report.requirements:
+        found = by_req.get(r.id, [])
+        worst = (
+            min(found, key=lambda f: taxonomy.SEVERITY_ORDER.index(f.severity)) if found else None
+        )
+        rows.append(
+            (
+                r.id,
+                r.source_id or "—",
+                SEVERITY_RU[worst.severity] if worst else clean,
+                ", ".join(dict.fromkeys(DEFECT_RU[f.defect_type] for f in found)) or "—",
+                _ids(found),
+            )
+        )
+    header = ("ID в отчёте", "ID в документе", "Результат", "Типы дефектов", "Замечания")
     return table(header, rows)
 
 

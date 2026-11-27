@@ -96,7 +96,7 @@ def test_pipe_and_newlines_escaped_in_table_cells() -> None:
     row = next(line for line in text.splitlines() if line.startswith("| R-001"))
     assert "FR\\|1" in row
     assert "a \\| b в две строки" in row
-    assert len(re.findall(r"(?<!\\)\|", row)) == 7
+    assert len(re.findall(r"(?<!\\)\|", row)) == 8
 
 
 def test_every_finding_has_place() -> None:

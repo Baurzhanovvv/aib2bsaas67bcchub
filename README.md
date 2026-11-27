@@ -14,6 +14,15 @@ cp .env.example .env                      # впишите ключ, см. ни�
 uv run reqcheck путь/к/requirements.md reports/report.md
 ```
 
+Без uv, обычным pip (Python 3.11+):
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install .                             # или: pip install -r requirements.txt && pip install --no-deps .
+cp .env.example .env
+reqcheck путь/к/requirements.md reports/report.md
+```
+
 Первый аргумент — проверяемый документ: Markdown, DOCX или PDF с текстовым слоем. В репозитории его
 нет: по условиям хакатона выданный документ сдаётся рядом со ссылкой, а не внутри репозитория. Отчёт
 ляжет в файл из второго аргумента, папка создаётся сама. `reports/report.md` в репозитории — отчёт
@@ -39,7 +48,7 @@ uv run reqcheck требования.md отчёт.pdf --profile bank   # плю
 | 1 | отчёт создан, итог «начинать нельзя» |
 | 2 | отчёт не создан: плохой вход (пустой, скан без текста, не тот формат) |
 
-Нужен [uv](https://docs.astral.sh/uv/).
+Запуск через [uv](https://docs.astral.sh/uv/) или обычный pip — см. «Быстрый старт».
 
 ## Ключ и модель
 
@@ -49,9 +58,11 @@ uv run reqcheck требования.md отчёт.pdf --profile bank   # плю
 GEMINI_API_KEY=ваш_ключ
 ```
 
-По умолчанию агент идёт по цепочке бесплатных моделей `gemini-3.1-flash-lite → gemini-3.5-flash-lite →
-gemini-3.8-flash`: если у модели кончилась дневная квота или она перегружена, берётся следующая. Свой
-список — `REQCHECK_MODEL` через запятую.
+По умолчанию агент идёт по цепочке бесплатных моделей `gemini-3.5-flash → gemini-3.8-flash →
+gemini-3.5-flash-lite → gemini-3.1-flash-lite`: если у модели кончилась дневная квота или она перегружена,
+берётся следующая. Сильные модели стоят первыми: lite-модели находят дефекты описания API, но
+противоречия бизнес-правил пропускают. Какая модель ответила, записано в паспорте отчёта. Свой список —
+`REQCHECK_MODEL` через запятую.
 
 **Точнее — Claude (платно).** Лучшие результаты (таблица ниже) получены на `claude-opus-5-5`:
 

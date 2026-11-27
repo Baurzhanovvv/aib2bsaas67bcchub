@@ -52,6 +52,17 @@ _SERVICE_SECTION_RE = re.compile(
     r"|глоссар|glossary",
     _FLAGS,
 )
+# Раздел, названный требованиями: его абзацы — требования и без слова «должен».
+_REQ_HEADING_RE = re.compile(r"требован|requirement", _FLAGS)
+# Строка-паспорт «ключ | значение» о самом документе или проекте, а не о поведении системы.
+_META_KEY_RE = re.compile(
+    r"^(?:автор\w*|author|разработчик\w*|developer|владел\w+(?:\s+\w+)?|owner|аналитик\w*|analyst"
+    r"|репозитори\w*|repository|git(?:lab|hub)?(?:\s+\w+)?|framework|фреймворк\w*"
+    r"|(?:задача\s+в\s+)?jira(?:\s+\w+)?)$",
+    _FLAGS,
+)
+MAX_META_VALUE = 60
+MIN_PLAIN_REQUIREMENT = 40
 _ACCEPT_SECTION_RE = re.compile(r"приёмк|приемк|acceptance|критери", _FLAGS)
 _NFR_SECTION_RE = re.compile(r"нефункц|non-?functional", _FLAGS)
 _NFR_TEXT_RE = re.compile(
@@ -165,14 +176,31 @@ def _section_text(fragment: Fragment) -> str:
 def _is_candidate(fragment: Fragment, source_id: str | None) -> bool:
     if fragment.kind in (FragmentKind.HEADING, FragmentKind.CODE):
         return False
+    if fragment.kind is FragmentKind.TABLE_ROW and _is_meta_row(fragment.text):
+        return False
     if source_id is None and _SERVICE_SECTION_RE.search(_section_text(fragment)):
         return False
     if source_id is not None or _MODALITY_RE.search(fragment.text) or _is_gwt(fragment.text):
         return True
     if fragment.kind is FragmentKind.PARAGRAPH:
-        return False
+        return _is_plain_requirement(fragment)
     section = _section_text(fragment)
     return bool(_REQ_SECTION_RE.search(section) or _API_SECTION_RE.search(section))
+
+
+def _is_meta_row(text: str) -> bool:
+    """«Автор | Иванов», «Framework | Spring»: ключ паспорта и короткое значение без «должен»."""
+    cells = [cell.strip(" *_`") for cell in text.strip().strip("|").split("|")]
+    if len(cells) != 2 or not _META_KEY_RE.match(cells[0]):
+        return False
+    return len(cells[1]) <= MAX_META_VALUE and not _MODALITY_RE.search(cells[1])
+
+
+def _is_plain_requirement(fragment: Fragment) -> bool:
+    """Абзац прямо под заголовком «Требования к …»: содержательный текст, не заглушка."""
+    if not fragment.section or len(fragment.text.strip()) < MIN_PLAIN_REQUIREMENT:
+        return False
+    return bool(_REQ_HEADING_RE.search(fragment.section[-1]))
 
 
 def _is_gwt(text: str) -> bool:

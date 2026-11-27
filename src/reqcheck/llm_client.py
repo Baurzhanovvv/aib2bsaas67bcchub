@@ -34,7 +34,8 @@ from reqcheck.llm_providers import (
 
 T = TypeVar("T", bound=BaseModel)
 
-DEFAULT_MODELS = "gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-3.8-flash"
+# Сначала сильные бесплатные модели: противоречия бизнес-правил lite-модели не находят.
+DEFAULT_MODELS = "gemini-3.5-flash,gemini-3.8-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite"
 DEFAULT_CACHE_DIR = ".reqcheck_cache"
 TRANSIENT_RETRIES = 2
 BACKOFF_BASE_S = 2.0

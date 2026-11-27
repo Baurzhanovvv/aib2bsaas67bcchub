@@ -302,6 +302,8 @@ class Passport(Contract):
     """Паспорт прогона (FR-10). Все значения ставит код."""
 
     document_name: str
+    document_title: str | None = None
+    """Первый заголовок документа, если он есть."""
     document_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     run_at: AwareDatetime
     agent_version: str

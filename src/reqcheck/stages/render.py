@@ -5,6 +5,7 @@ from datetime import datetime
 
 from reqcheck.models import (
     Finding,
+    Passport,
     Report,
     RunMode,
     Scope,
@@ -18,6 +19,7 @@ from reqcheck.stages.render_tables import (
     customer_questions,
     registry_table,
     severity_table,
+    verdict_table,
 )
 from reqcheck.stages.render_tables import (
     place as _place,
@@ -42,6 +44,10 @@ SEVERITY_ORDER = (Severity.BLOCKER, Severity.CRITICAL, Severity.MAJOR, Severity.
 
 
 # --- Мелкие помощники ---------------------------------------------------------------
+
+
+def _document(p: Passport) -> str:
+    return f"{p.document_title} ({p.document_name})" if p.document_title else p.document_name
 
 
 def _inline(text: str) -> str:
@@ -78,7 +84,7 @@ def _passport(report: Report) -> list[str]:
     else:
         mode = "только правила, без модели"
     rows: list[tuple[str, str]] = [
-        ("Документ", p.document_name),
+        ("Документ", _document(p)),
         ("SHA-256", p.document_sha256[:12]),
         ("Дата и время", _dt(p.run_at)),
         ("Модель", model),
@@ -147,6 +153,15 @@ def _per_requirement(report: Report) -> list[str]:
     elif report.passport.mode is RunMode.RULES_ONLY:
         out += [
             "Прогон без модели: применены только правила, смысловая проверка не выполнялась.",
+            "",
+        ]
+    if report.requirements:
+        checked = report.passport.mode is RunMode.FULL
+        out += [
+            *verdict_table(report, checked),
+            "",
+            "Замечание, которое затрагивает несколько требований, раскрыто в разделе 4, "
+            "а в таблице указано у каждого из них. Ниже — замечания к одному требованию.",
             "",
         ]
     by_req: dict[str, list[Finding]] = defaultdict(list)

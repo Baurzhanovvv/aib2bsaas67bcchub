@@ -6,6 +6,7 @@ from reqcheck.llm import LLMUsage
 from reqcheck.models import (
     Document,
     Finding,
+    FragmentKind,
     GroundingResult,
     Passport,
     Report,
@@ -19,6 +20,7 @@ from reqcheck.models import (
 from reqcheck.version import agent_version
 
 MAX_FIX_FIRST = 10
+MAX_TITLE = 120
 CRITICAL_SEVERITIES = (Severity.BLOCKER, Severity.CRITICAL)
 
 
@@ -69,8 +71,10 @@ def _passport(
 ) -> Passport:
     version, dirty = agent_version()
     counters = usage if usage is not None else LLMUsage()
+    title = next((f.text for f in document.fragments if f.kind is FragmentKind.HEADING), None)
     return Passport(
         document_name=document.name,
+        document_title=" ".join(title.split())[:MAX_TITLE] if title else None,
         document_sha256=document.sha256,
         run_at=datetime.now(UTC),
         agent_version=version,

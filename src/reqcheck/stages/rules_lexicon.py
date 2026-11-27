@@ -76,7 +76,7 @@ MUTATION_RU = _rx(
 MUTATION_EN = _rx(
     r"\b(?:save|saves|create|creates|update|updates|delete|deletes|set|sets|remove|removes)\b"
 )
-# saveLimit, create_order, /items/delete — действие внутри идентификатора.
+# setPrice, create_order, /items/delete — действие внутри идентификатора.
 MUTATION_IDENT = re.compile(r"(?<![A-Za-z])(?:save|create|update|delete|set|remove)(?=[A-Z_/\-])")
 
 STATUS_200 = re.compile(r"(?<![\d.,/-])200(?![\d.,]*\d)(?!\s*(?:₸|тг|тенге|руб|\$|%|шт|мс|ms))")
@@ -91,14 +91,14 @@ ERROR_MARKER = _rx(
 
 # --- Контракт API между фрагментами (rules_api) -------------------------------
 
-# Объявление метода: «REST type | GET», «Метод: `GET`», «HTTP method — HEAD».
+# Объявление метода: «Метод: `GET`», «HTTP method — HEAD», строка таблицы с типом запроса.
 API_METHOD_DECL = re.compile(r"(?i:REST\s*type|HTTP[- ]?method|метод|method)\W{0,12}(GET|HEAD)\b")
 # Назначение операции начинается со слова-действия: «Description | Сохранение …».
 API_PURPOSE_MUTATION = _rx(
     r"^\W*(?:description|описание|назначение|purpose|summary)\W+"
     rf"({MUTATION_RU.pattern}|{MUTATION_EN.pattern})"
 )
-# Действие в имени операции внутри пути: /items/saveLimit, /orders/delete-all.
+# Действие в имени операции внутри пути: /items/setPrice, /orders/delete-all.
 API_PATH_MUTATION = re.compile(
     r"/[\w\-/{}]*?(?<![A-Za-z])((?:save|create|update|delete|set|remove)(?=[A-Z_/\-])\w*)"
 )
@@ -134,7 +134,7 @@ REASON_PHRASES: dict[str, int] = {
     "internal server error": 500,
 }
 # Фраза стоит сразу за кодом; между ними — знаки и не больше одного слова с тире:
-# «204 — Not Found», «200. Successful — Created», «`201` | **Created**».
+# «204 — Not Found», «202. Done — Created», «`201` | **Created**».
 STATUS_WITH_PHRASE = _rx(
     rf"(?<![\d.,/:-])(?<!\d[\s ]){_STATUS}[\s.|:*_`—–-]{{0,8}}"
     r"(?:[A-Za-zА-Яа-яЁё]+[\s*_`]*[—–-][\s*_`]*)?\b(" + "|".join(REASON_PHRASES) + r")\b"

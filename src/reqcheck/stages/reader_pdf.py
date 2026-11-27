@@ -7,8 +7,13 @@
   точки в конце; уровень — по рангу размера шрифта. Не уверены — это абзац.
 - `line_start/line_end` — номера строк на странице в порядке чтения; строка
   таблицы занимает одну строку.
-- Строки таблиц берутся из `find_tables()` (только таблицы с рамками), включая
-  заголовок: текст — ячейки через « | » с обрамляющими «|».
+- Строки таблиц берутся из `find_tables()` (только таблицы с рамками): текст — ячейки
+  через « | » с обрамляющими «|». После шапки ставится строка-разделитель, как в
+  Markdown, чтобы шапку не приняли за требование; шапка, повторённая на новой
+  странице, отбрасывается.
+- Строка, начинающаяся с идентификатора требования («FR-10:», «[REQ-3]»), открывает
+  новый пункт, даже если маркера списка в тексте PDF нет.
+- Строки моноширинным шрифтом — блок кода.
 - Повторяющиеся колонтитулы и номера страниц у краёв страницы отбрасываются.
 - Страница без текста попадает в `unread_pages`; если текста нет нигде — скан.
 """
@@ -16,7 +21,7 @@
 import re
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pymupdf
 
@@ -24,7 +29,15 @@ from reqcheck.errors import InputError
 from reqcheck.models import Fragment, FragmentKind, Location
 
 _MARKER = re.compile(r"^(?:[•●▪◦‣\-–—*·]|\d{1,3}[.)]|[a-zA-Zа-яА-Я][.)])\s+\S")
+_BULLET = re.compile(r"^[•●▪◦‣\-–—*·]\s")
+# После идентификатора — знак («FR-10:», «[REQ-3]», «AB-1. …», «AB-2 — …»): голое «AES-256 с ключом»
+# посреди предложения пунктом не считается.
+_ID_LEAD = re.compile(
+    r"^(?:\[[A-ZА-ЯЁ]{1,5}-?\d+(?:\.\d+)*\]|[A-ZА-ЯЁ]{1,5}-\d+(?:\.\d+)*(?:[.:)]\s|\s+[—–-]\s))"
+)
+MAX_MONO_SHARE = 0.5
 _WS = re.compile(r"\s+")
+_MONO_FLAG = 8
 _EDGE = 0.08
 _HEADING_RATIO = 1.15
 _MAX_BOLD_HEADING = 100
@@ -39,6 +52,7 @@ class _Line:
     block: int
     y0: float
     edge: bool
+    mono: bool = False
 
 
 @dataclass(frozen=True)
@@ -94,7 +108,8 @@ def _page_lines(page: pymupdf.Page, rects: list[pymupdf.Rect]) -> list[_Line]:
             bold = all(s["flags"] & 16 or "bold" in s["font"].lower() for s in spans)
             edge = y0 < height * _EDGE or y1 > height * (1 - _EDGE)
             size = max(s["size"] for s in spans)
-            lines.append(_Line(text, size, bold, block["number"], y0, edge))
+            mono = all(s["flags"] & _MONO_FLAG for s in spans)
+            lines.append(_Line(text, size, bold, block["number"], y0, edge, mono))
     return lines
 
 
@@ -123,11 +138,17 @@ def _body_size(pages: list[list[_Line]]) -> float:
 
 
 def _heading_key(line: _Line, body: float, body_bold: bool) -> tuple[int, bool] | None:
-    if _MARKER.match(line.text):
+    if line.mono or _BULLET.match(line.text):
+        return None
+    # «FR-1 Вход в систему» крупным шрифтом — заголовок раздела, обычным — пункт требований.
+    if _ID_LEAD.match(line.text) and line.size < body * _HEADING_RATIO:
+        return None
+    short = len(line.text) <= _MAX_BOLD_HEADING and not line.text.endswith((".", ";", ":", ","))
+    # Нумерованный заголовок («3.1 Цели», «200. Created») — заголовок, если выделен целиком.
+    if _MARKER.match(line.text) and not (line.bold and not body_bold and short):
         return None
     if line.size >= body * _HEADING_RATIO:
         return (round(line.size), line.bold)
-    short = len(line.text) <= _MAX_BOLD_HEADING and not line.text.endswith((".", ";", ":", ","))
     if line.bold and not body_bold and short:
         return (round(body), True)
     return None
@@ -147,13 +168,20 @@ def _pieces(lines: list[_Line], body: float, body_bold: bool) -> list[_Piece]:
 
     for line in lines:
         key = _heading_key(line, body, body_bold)
-        marker = key is None and bool(_MARKER.match(line.text))
+        marker = (
+            key is None
+            and not line.mono
+            and bool(_MARKER.match(line.text) or _ID_LEAD.match(line.text))
+        )
         same_block = bool(current) and current[-1].block == line.block
-        if not (same_block and key == current_key and not marker):
+        same_font = bool(current) and current[-1].mono == line.mono
+        if not (same_block and same_font and key == current_key and not marker):
             flush()
             current_key = key
             if key is not None:
                 current_kind = FragmentKind.HEADING
+            elif line.mono:
+                current_kind = FragmentKind.CODE
             else:
                 current_kind = FragmentKind.LIST_ITEM if marker else FragmentKind.PARAGRAPH
         current.append(line)
@@ -161,13 +189,31 @@ def _pieces(lines: list[_Line], body: float, body_bold: bool) -> list[_Piece]:
     return pieces
 
 
-def _table_pieces(tables: list[tuple[pymupdf.Rect, list[list[str]], list[float]]]) -> list[_Piece]:
+def _table_pieces(
+    tables: list[tuple[pymupdf.Rect, list[list[str]], list[float]]], carried: str | None
+) -> tuple[list[_Piece], str | None]:
+    """Строки таблиц страницы и шапка последней таблицы (для переноса на следующую страницу).
+
+    carried — шапка таблицы, не законченной на предыдущей странице: её повтор отбрасывается.
+    """
     pieces: list[_Piece] = []
-    for _, rows, ys in tables:
-        for row, y0 in zip(rows, ys, strict=True):
-            if any(row):
-                pieces.append(_Piece(FragmentKind.TABLE_ROW, "| " + " | ".join(row) + " |", y0, 1))
-    return sorted(pieces, key=lambda p: p.y0)
+    header = carried
+    for _, rows, ys in sorted(tables, key=lambda t: t[2][0] if t[2] else 0.0):
+        texts = [("| " + " | ".join(row) + " |", y0) for row, y0 in zip(rows, ys, strict=True)]
+        texts = [(text, y0) for text, y0 in texts if text.strip("| ")]
+        if not texts:
+            continue
+        if not pieces and carried is not None and texts[0][0] == carried:
+            texts = texts[1:]  # продолжение таблицы: шапка повторена при разрыве страницы
+        else:
+            header = texts[0][0]
+            width = header.count(" | ") + 1
+            pieces.append(_Piece(FragmentKind.TABLE_ROW, header, texts[0][1], 1))
+            # Разделитель делит строку с шапкой: номера остальных строк не сдвигаются.
+            pieces.append(_Piece(FragmentKind.TABLE_ROW, "|" + " --- |" * width, texts[0][1], 0))
+            texts = texts[1:]
+        pieces += [_Piece(FragmentKind.TABLE_ROW, text, y0, 1) for text, y0 in texts]
+    return pieces, header
 
 
 def _merge(text: list[_Piece], table: list[_Piece]) -> list[_Piece]:
@@ -203,13 +249,15 @@ def _page_content(
     page_lines: list[list[_Line]] = []
     page_tables: list[list[_Piece]] = []
     unread: list[int] = []
+    header: str | None = None
     for number, page in enumerate(doc, start=1):
         try:
             tables = _page_tables(page)
             lines = _page_lines(page, [rect for rect, _, _ in tables])
-            table_pieces = _table_pieces(tables)
+            # Шапка переносится только на следующую страницу с таблицей.
+            table_pieces, header = _table_pieces(tables, header if tables else None)
         except Exception:  # noqa: BLE001 — страница не читается: фиксируем, идём дальше
-            lines, table_pieces = [], []
+            lines, table_pieces, header = [], [], None
         if not lines and not table_pieces:
             unread.append(number)
         page_lines.append(lines)
@@ -228,6 +276,10 @@ def parse_pdf(data: bytes, next_id: Callable[[], str]) -> tuple[list[Fragment], 
     page_lines = [_drop_furniture(lines, repeated) for lines in page_lines]
     body = _body_size(page_lines)
     all_lines = [ln for lines in page_lines for ln in lines]
+    if all_lines and sum(ln.mono for ln in all_lines) > len(all_lines) * MAX_MONO_SHARE:
+        # Весь документ набран моноширинным шрифтом: это текст, а не код.
+        page_lines = [[replace(ln, mono=False) for ln in lines] for lines in page_lines]
+        all_lines = [ln for lines in page_lines for ln in lines]
     body_bold = bool(all_lines) and sum(ln.bold for ln in all_lines) > len(all_lines) / 2
     per_page = [
         _merge(_pieces(lines, body, body_bold), tables)
@@ -236,6 +288,12 @@ def parse_pdf(data: bytes, next_id: Callable[[], str]) -> tuple[list[Fragment], 
     keys = sorted({p.heading_key for page in per_page for p in page if p.heading_key}, reverse=True)
     levels = {key: rank + 1 for rank, key in enumerate(keys)}
     return _fragments(per_page, levels, next_id), tuple(unread)
+
+
+def _location(page: int, line: int, lines: int) -> Location:
+    if lines == 0:  # разделитель таблицы стоит на строке шапки
+        line = max(line - 1, 1)
+    return Location(page=page, line_start=line, line_end=line + max(lines, 1) - 1)
 
 
 def _fragments(
@@ -256,9 +314,7 @@ def _fragments(
                     id=next_id(),
                     kind=piece.kind,
                     text=piece.text,
-                    location=Location(
-                        page=page_number, line_start=line, line_end=line + piece.lines - 1
-                    ),
+                    location=_location(page_number, line, piece.lines),
                     section=tuple(title for _, title in headings),
                 )
             )

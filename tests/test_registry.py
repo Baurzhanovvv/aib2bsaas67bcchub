@@ -323,3 +323,29 @@ def test_regulation_designations_are_not_ids_or_requirements() -> None:
         frag(2, K.PARAGRAPH, "ФЗ-152 регулирует обработку данных.", "Нормативная база"),
     )
     assert build_registry(fragments, None) == ()
+
+
+def test_document_passport_rows_are_not_requirements_but_content_rows_are() -> None:
+    section = ("Интерфейс API", "Общие параметры")
+    rows = (
+        "| Author | Школа аналитиков |",
+        "| Gitlab project | internal |",
+        "| Framework | Spring |",
+        "| Разработчик | Команда склада |",
+        "| Developer | Команда должна согласовать схему |",
+        "| Статус | Активен при наличии оплаты и подтверждения |",
+        "| Timeout | 30 секунд |",
+    )
+    fragments = [frag(n, FragmentKind.TABLE_ROW, text, *section) for n, text in enumerate(rows, 1)]
+    quotes = [r.quote for r in build_registry(doc(*fragments), None)]
+    assert quotes == list(rows[4:])
+
+
+def test_paragraph_under_requirements_heading_is_requirement() -> None:
+    long = "Склад выдаёт груз курьеру за десять минут с момента прихода машины."
+    fragments = (
+        frag(1, FragmentKind.PARAGRAPH, long, "Склад", "Нефункциональные требования"),
+        frag(2, FragmentKind.PARAGRAPH, "заполняется позже", "Склад", "Требования к тестам"),
+        frag(3, FragmentKind.PARAGRAPH, long, "Склад", "Схема процесса"),
+    )
+    assert [r.quote for r in build_registry(doc(*fragments), None)] == [long]

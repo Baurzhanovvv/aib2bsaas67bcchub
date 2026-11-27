@@ -46,7 +46,7 @@ def test_registry_lists_all_requirements_with_findings_column_and_short_summary(
     long_summary = "слово " * 30
     rep = report([req("R-001", summary=long_summary), req("R-002")], [fnd("D-001")])
     text = render_markdown(rep)
-    assert "| ID в отчёте | ID в документе | Тип | Кратко | Место | Замечания |" in text
+    assert "| ID в отчёте | ID в документе | Тип | Кратко | Цитата | Место | Замечания |" in text
     row1 = next(x for x in text.splitlines() if x.startswith("| R-001 |"))
     row2 = next(x for x in text.splitlines() if x.startswith("| R-002 |"))
     assert row1.endswith("| D-001 |")

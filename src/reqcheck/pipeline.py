@@ -30,6 +30,7 @@ from reqcheck.stages import (
 Progress = Callable[[str], None]
 """Куда сообщать о начале этапа (FR-23); в отчёт это не попадает."""
 STEPS = 6
+MAX_ERROR_NOTE = 160
 
 
 def _silent(_: str) -> None:
@@ -79,6 +80,8 @@ def build(
         model_found, trace, model_error = _model_checks(document, requirements, llm, profile)
         raw += model_found
 
+    if model_error is not None:
+        progress(f"Модель не отработала, отчёт будет неполным: {model_error[:MAX_ERROR_NOTE]}")
     progress(f"[5/{STEPS}] Сверка цитат и склейка дублей: замечаний до сверки {len(raw)}")
     grounded = grounding.verify_and_classify(document, requirements, raw)
     merger = llm if model_error is None else None
