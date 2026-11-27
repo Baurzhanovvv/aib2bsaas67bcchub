@@ -268,3 +268,17 @@ def test_findings_sorted_by_id_and_fix_first_overflow() -> None:
     text = render_markdown(make_report(findings=fs, fix_first=("D-001",)))
     assert text.index("#### D-001") < text.index("#### D-002") < text.index("#### D-003")
     assert "И ещё 2, см. раздел 5." in text
+
+
+def test_lite_model_answer_makes_verdict_undetermined() -> None:
+    """Запасная облегчённая модель отвечала хотя бы раз — «можно начинать» не пишем."""
+    base = make_report().passport
+    mixed = base.model_copy(update={"mode": RunMode.FULL, "model": "big-flash,big-flash-lite"})
+    strong = base.model_copy(update={"mode": RunMode.FULL, "model": "big-flash"})
+    text = render_markdown(make_report(passport=mixed, verdict=Verdict.CONDITIONAL_GO))
+    assert text.count("Итог не определён: проверка неполная") == 2
+    assert "облегчённая модель (big-flash-lite)" in text
+    text = render_markdown(make_report(passport=strong, verdict=Verdict.CONDITIONAL_GO))
+    assert "Итог не определён" not in text
+    blocked = render_markdown(make_report(passport=mixed, verdict=Verdict.NO_GO))
+    assert "Начинать разработку нельзя" in blocked

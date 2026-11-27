@@ -37,6 +37,9 @@ from reqcheck.stages.render_tables import (
 BRIEF_TOP = 5
 BRIEF_EXPLANATION_LIMIT = 120
 
+# Признак облегчённой модели в её имени. Замер на трёх прогонах: такие модели не нашли
+# ни одного противоречия бизнес-правил, которые находят полные модели того же провайдера.
+WEAK_MODEL_MARKS = ("lite",)
 _INCOMPLETE = "отчёт неполный, набор требований не проверен моделью."
 _INTERRUPTED = "ВНИМАНИЕ: проверка моделью прервана, " + _INCOMPLETE
 
@@ -266,10 +269,16 @@ def _summary(report: Report) -> list[str]:
     return [*out, "", *coverage_table(report)]
 
 
+def _weak_models(p: Passport) -> list[str]:
+    """Облегчённые модели среди ответивших (обычно запасные, когда у основной кончилась квота)."""
+    names = [name.strip() for name in (p.model or "").split(",")]
+    return [name for name in names if any(mark in name.lower() for mark in WEAK_MODEL_MARKS)]
+
+
 def _incomplete(report: Report) -> bool:
-    """Документ проверен не целиком: модель не отработала или есть непрочитанные страницы."""
+    """Проверка неполная: модель не отработала, отвечала облегчённая или не прочитаны страницы."""
     p = report.passport
-    return p.mode is RunMode.RULES_ONLY or bool(p.unread_pages)
+    return p.mode is RunMode.RULES_ONLY or bool(p.unread_pages) or bool(_weak_models(p))
 
 
 def _verdict_text(report: Report) -> str:
@@ -294,6 +303,15 @@ def _verdict(report: Report) -> list[str]:
         out += [f"Ограничение: проверка моделью прервана ({p.model_error}); {_INCOMPLETE}", ""]
     elif p.mode is RunMode.RULES_ONLY:
         out += [f"Ограничение: прогон без модели; {_INCOMPLETE}", ""]
+    elif _weak_models(p):
+        out += [
+            "Ограничение: часть запросов выполнила облегчённая модель "
+            f"({', '.join(_weak_models(p))}). "
+            "Такие модели проверяют описание интерфейса, но противоречия бизнес-правил пропускают, "
+            "поэтому отсутствие блокирующих дефектов в этом отчёте не значит, что их нет. "
+            "Повторите прогон на полной модели.",
+            "",
+        ]
     if p.unread_pages:
         out += [f"Ограничение: не прочитаны страницы {_pages(p.unread_pages)}.", ""]
     crit = [by_id[i] for i in report.summary.critical_finding_ids]
